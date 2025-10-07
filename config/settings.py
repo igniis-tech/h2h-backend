@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import dj_database_url
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -9,7 +11,8 @@ load_dotenv(BASE_DIR / ".env")
 
 # ---- Core ----
 SECRET_KEY = 'django-insecure-#o*1r_%m6d$ofi^h%*r-_lmt6hi2(rucujd9=)d-g*sfnu@kpy'
-DEBUG = False  # production-safe on Vercel
+DEBUG = True
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 ALLOWED_HOSTS = [
     "localhost",
@@ -69,12 +72,25 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 # ---- DB ----
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+if DATABASE_URL:
+    # Use pooled connection for serverless if you set a pooled URL
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,      # good pooling for serverless
+            ssl_require=True       # Supabase requires SSL
+        )
     }
-}
+else:
+    # local/dev fallback with SQLite
+    from pathlib import Path
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = []
 
