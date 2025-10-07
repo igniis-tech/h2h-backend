@@ -3,14 +3,27 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Optional for local dev; harmless on Vercel (it won't read local .env)
 load_dotenv(BASE_DIR / ".env")
 
-DJANGO_SECRET_KEY="KkL6v8c3wYH$e@7pR2nZqX1!G9mJt4b^S0u+EaF*(d)_rA5CzVQ"
+# ---- Core ----
+SECRET_KEY = "KkL6v8c3wYH$e@7pR2nZqX1!G9mJt4b^S0u+EaF*(d)_rA5CzVQ"  # hard-coded
+DEBUG = False  # production-safe on Vercel
 
-DEBUG = True
+ALLOWED_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    ".vercel.app",
+    "h2h-backend-vpk9.vercel.app",  # your deployment
+]
 
-ALLOWED_HOSTS = 'localhost','127.0.0.1','.vercel.app'
+# If you POST from the Vercel domain, add it to CSRF trusted origins
+CSRF_TRUSTED_ORIGINS = [
+    "https://h2h-backend-vpk9.vercel.app",
+]
 
+# ---- Apps ----
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -55,6 +68,7 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
+# ---- DB ----
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
@@ -64,17 +78,24 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = []
 
+# ---- I18N/Timezone ----
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Asia/Kolkata"
 USE_I18N = True
 USE_TZ = True
 
+# ---- Static ----
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-CORS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# ---- CORS ----
+# If you have a frontend domain, add it here (comma-separated via env still works locally)
+CORS_ALLOWED_ORIGINS = [
+    *[o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+]
 CORS_ALLOW_CREDENTIALS = True
 
+# ---- DRF ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",
@@ -84,6 +105,7 @@ REST_FRAMEWORK = {
     ],
 }
 
+# ---- Cognito (still via env so you can rotate secrets without code changes) ----
 COGNITO = {
     "REGION": os.getenv("COGNITO_REGION"),
     "DOMAIN": os.getenv("COGNITO_DOMAIN"),
@@ -95,6 +117,7 @@ COGNITO = {
     "SCOPES": os.getenv("COGNITO_SCOPES", "openid email"),
 }
 
+# ---- Razorpay (optional; leave blank until configured) ----
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
