@@ -1,6 +1,10 @@
 from django.contrib import admin
 from .models import UserProfile, Package, Order
 
+admin.site.site_header = "H2H Admin Panel"
+admin.site.site_title = "H2H Admin"
+admin.site.index_title = "Welcome to H2H Admin"
+
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
