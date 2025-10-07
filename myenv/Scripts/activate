@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\rohit\Downloads\highway-to-heal-backend-no-razorpay-needed\h2h_backend\myenv"
+VIRTUAL_ENV="E:\H2H\Dev\h2h-backend\myenv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

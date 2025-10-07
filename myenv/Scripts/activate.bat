@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\rohit\Downloads\highway-to-heal-backend-no-razorpay-needed\h2h_backend\myenv
+set VIRTUAL_ENV=E:\H2H\Dev\h2h-backend\myenv
 
 if not defined PROMPT set PROMPT=$P$G
 
