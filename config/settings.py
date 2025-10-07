@@ -3,7 +3,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv()
 
 DJANGO_SECRET_KEY="KkL6v8c3wYH$e@7pR2nZqX1!G9mJt4b^S0u+EaF*(d)_rA5CzVQ"
 
