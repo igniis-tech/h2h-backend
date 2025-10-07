@@ -8,7 +8,7 @@ load_dotenv(BASE_DIR / ".env")
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret")
 DEBUG = "false"
 
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()] or ["*"]
+ALLOWED_HOSTS = 'localhost','127.0.0.1','.vercel.app'
 
 INSTALLED_APPS = [
     "django.contrib.admin",
