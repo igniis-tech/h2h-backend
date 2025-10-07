@@ -6,3 +6,4 @@ requests==2.32.3
 razorpay==1.4.2
 reportlab==4.2.2
 PyJWT==2.9.0
+setuptools>=68.0.0
