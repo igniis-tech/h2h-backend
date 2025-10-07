@@ -8,7 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # ---- Core ----
-SECRET_KEY = "KkL6v8c3wYH$e@7pR2nZqX1!G9mJt4b^S0u+EaF*(d)_rA5CzVQ"  # hard-coded
+SECRET_KEY = 'django-insecure-#o*1r_%m6d$ofi^h%*r-_lmt6hi2(rucujd9=)d-g*sfnu@kpy'
 DEBUG = False  # production-safe on Vercel
 
 ALLOWED_HOSTS = [
