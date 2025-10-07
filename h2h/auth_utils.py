@@ -1,20 +1,21 @@
 import base64
-import requests
+import json
 from urllib.parse import urlencode
+
+import requests
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
 from django.contrib.auth.models import User
+from django.core.exceptions import ImproperlyConfigured
+
 from .models import UserProfile
 
 
 def _cfg() -> dict:
     """
-    Lazy-read Cognito config so Django can start/migrate
-    even if env vars aren’t set yet. We only validate when
-    an SSO function is actually called.
+    Lazy-read Cognito config so Django can start/migrate even if env vars aren’t set yet.
+    We only validate when an SSO function is actually called.
     """
     cfg = getattr(settings, "COGNITO", {}) or {}
-    # Normalize and provide safe fallbacks
     domain = (cfg.get("DOMAIN") or "").rstrip("/")
     return {
         "DOMAIN": domain,
@@ -22,7 +23,8 @@ def _cfg() -> dict:
         "CLIENT_SECRET": cfg.get("CLIENT_SECRET"),
         "REDIRECT_URI": cfg.get("REDIRECT_URI"),
         "LOGOUT_REDIRECT_URI": cfg.get("LOGOUT_REDIRECT_URI") or cfg.get("REDIRECT_URI"),
-        "SCOPES": cfg.get("SCOPES") or "openid email",
+        # Ask for all common attributes by default; you can narrow via settings if needed.
+        "SCOPES": cfg.get("SCOPES") or "openid email profile phone address",
     }
 
 
@@ -80,19 +82,48 @@ def fetch_userinfo(access_token: str):
     headers = {"Authorization": f"Bearer {access_token}"}
     resp = requests.get(userinfo_url, headers=headers, timeout=15)
     resp.raise_for_status()
-    return resp.json()  # {sub, email, given_name, ...}
+    return resp.json()  # {sub, email, name, given_name, family_name, phone_number, address, ...}
 
 
-def get_or_create_user_from_userinfo(info: dict) -> User:
-    sub = info.get("sub")
-    email = (info.get("email") or "").lower()
-    given = info.get("given_name", "")
-    family = info.get("family_name", "")
-
+def get_or_create_user_from_userinfo(userinfo: dict) -> User:
+    """
+    Map Cognito OIDC claims into Django User + UserProfile.
+    Requires your App Client to grant READ for the attributes
+    and your OAuth scopes to include: openid email profile phone address.
+    """
+    sub = userinfo.get("sub")
     if not sub:
         raise ValueError("Cognito userinfo missing 'sub'")
 
-    user = User.objects.filter(email=email).first() if email else None
+    # Core claims
+    email = (userinfo.get("email") or "").strip().lower()
+    email_verified = bool(userinfo.get("email_verified") is True)
+
+    # Name resolution
+    full_name = (userinfo.get("name") or "").strip()
+    if not full_name:
+        given = (userinfo.get("given_name") or "").strip()
+        family = (userinfo.get("family_name") or "").strip()
+        composed = f"{given} {family}".strip()
+        full_name = composed or (email.split("@")[0] if email else sub)
+
+    # Optional claims
+    gender = (userinfo.get("gender") or "").strip()
+    phone_number = (userinfo.get("phone_number") or "").strip()
+    phone_number_verified = bool(userinfo.get("phone_number_verified") is True)
+
+    # Address: OIDC may return a dict with 'formatted'
+    addr = userinfo.get("address")
+    if isinstance(addr, dict):
+        address_text = addr.get("formatted") or json.dumps(addr, ensure_ascii=False)
+    else:
+        address_text = (addr or "").strip()
+
+    # --- Create/lookup User ---
+    user = None
+    if email:
+        user = User.objects.filter(email__iexact=email).first()
+
     if not user:
         base_username = (email.split("@")[0] if email else f"cognito_{sub[:8]}")[:25]
         uname = base_username
@@ -101,16 +132,57 @@ def get_or_create_user_from_userinfo(info: dict) -> User:
             i += 1
             uname = f"{base_username}{i}"[:30]
         user = User.objects.create(
-            username=uname, email=email, first_name=given, last_name=family
+            username=uname,
+            email=email or "",
+            # Keep first/last optional; full_name is stored on profile
+            first_name="",
+            last_name="",
         )
+    else:
+        # Ensure we keep email in sync if it was empty before
+        if email and user.email != email:
+            user.email = email
+            user.save(update_fields=["email"])
 
-    profile, _ = UserProfile.objects.get_or_create(
+    # --- Upsert Profile ---
+    profile, created = UserProfile.objects.get_or_create(
         user=user,
-        defaults={"cognito_sub": sub, "full_name": f"{given} {family}".strip()},
+        defaults={
+            "cognito_sub": sub,
+            "full_name": full_name,
+            "gender": gender,
+            "phone_number": phone_number,
+            "address": address_text,
+            "email_verified": email_verified,
+            "phone_number_verified": phone_number_verified,
+        },
     )
-    if profile.cognito_sub != sub:
+
+    # Update existing profile fields if changed
+    changed = False
+    if not profile.cognito_sub:
         profile.cognito_sub = sub
-        profile.save(update_fields=["cognito_sub"])
+        changed = True
+    if profile.full_name != full_name:
+        profile.full_name = full_name
+        changed = True
+    if profile.gender != gender:
+        profile.gender = gender
+        changed = True
+    if profile.phone_number != phone_number:
+        profile.phone_number = phone_number
+        changed = True
+    if profile.address != address_text:
+        profile.address = address_text
+        changed = True
+    if profile.email_verified != email_verified:
+        profile.email_verified = email_verified
+        changed = True
+    if profile.phone_number_verified != phone_number_verified:
+        profile.phone_number_verified = phone_number_verified
+        changed = True
+    if changed:
+        profile.save()
 
     return user
 

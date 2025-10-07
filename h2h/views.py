@@ -209,10 +209,11 @@ def sso_callback(request):
         login(request, user)
         return Response(
             {
-                "user": UserSerializer(user).data,
-                "tokens": {k: v for k, v in tokens.items() if k in ("id_token", "access_token")},
-                "state": state,
-            }
+            "user": UserSerializer(user).data,
+            "tokens": {k: v for k, v in tokens.items() if k in ("id_token", "access_token")},
+            "claims": info,   # <— add this line
+            "state": state,
+}
         )
     except Exception as e:
         return Response({"error": str(e)}, status=400)

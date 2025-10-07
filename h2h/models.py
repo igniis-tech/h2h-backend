@@ -3,8 +3,19 @@ from django.contrib.auth.models import User
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    # Stable unique identifier from Cognito
     cognito_sub = models.CharField(max_length=128, unique=True)
-    full_name = models.CharField(max_length=255, blank=True)
+
+    # From Cognito OIDC claims
+    full_name = models.CharField(max_length=255, blank=True, default="")
+    gender = models.CharField(max_length=32, blank=True, default="")
+    phone_number = models.CharField(max_length=32, blank=True, default="")
+    address = models.TextField(blank=True, default="")
+    email_verified = models.BooleanField(default=False)
+    phone_number_verified = models.BooleanField(default=False)
+
+    # Bookkeeping
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.user.username} ({self.cognito_sub})"
