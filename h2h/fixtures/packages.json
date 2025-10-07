@@ -1,0 +1,5 @@
+[
+  {"model": "h2h.package", "pk": 1, "fields": {"name": "Silver Pass", "description": "Entry + Seating", "price_inr": 999, "active": true}},
+  {"model": "h2h.package", "pk": 2, "fields": {"name": "Gold Pass", "description": "Silver + Backstage Tour", "price_inr": 1999, "active": true}},
+  {"model": "h2h.package", "pk": 3, "fields": {"name": "Platinum Pass", "description": "All Access VIP", "price_inr": 3999, "active": true}}
+]
