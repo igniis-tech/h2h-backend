@@ -11,7 +11,7 @@ load_dotenv(BASE_DIR / ".env")
 
 # ---- Core ----
 SECRET_KEY = 'django-insecure-#o*1r_%m6d$ofi^h%*r-_lmt6hi2(rucujd9=)d-g*sfnu@kpy'
-DEBUG = True
+DEBUG = False
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 ALLOWED_HOSTS = [
@@ -42,6 +42,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -103,6 +104,7 @@ USE_TZ = True
 # ---- Static ----
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ---- CORS ----
 # If you have a frontend domain, add it here (comma-separated via env still works locally)
