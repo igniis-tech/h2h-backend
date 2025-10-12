@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import UserProfile, Package, Order
+from .models import UserProfile, Package, Order, WebhookEvent
 
 admin.site.site_header = "H2H Admin Panel"
 admin.site.site_title = "H2H Admin"
@@ -54,3 +54,10 @@ class OrderAdmin(admin.ModelAdmin):
         "user__username",
         "user__email",
     )
+
+
+@admin.register(WebhookEvent)
+class WebhookEventAdmin(admin.ModelAdmin):
+    list_display = ("id", "provider", "event", "processed_ok", "matched_order", "created_at")
+    list_filter = ("provider", "processed_ok", "event", "created_at")
+    search_fields = ("event", "signature", "delivery_id", "matched_order__razorpay_order_id")
