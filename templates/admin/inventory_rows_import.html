@@ -1,0 +1,20 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block content %}
+  <h1>{{ title }}</h1>
+  <div class="module">
+    <p>
+      CSV headers (case-insensitive): 
+      <code>PROPERTY, TYPE, CATEGORY, NO OF TENT, PEOPLE SHARE PER ROOM, facility</code>.
+      <a href="{% url sample_url %}">Download sample CSV</a>
+    </p>
+    <form method="post" enctype="multipart/form-data" novalidate>
+      {% csrf_token %}
+      <table>
+        {{ form.as_table }}
+      </table>
+      <p><input type="submit" class="default" value="Upload & Import"></p>
+    </form>
+  </div>
+{% endblock %}
