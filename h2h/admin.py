@@ -1,683 +1,3 @@
-# # from django.contrib import admin
-# # from .models import UserProfile, Package, Order, WebhookEvent, Property, UnitType, Unit, Booking, Allocation,Event, EventDay
-
-# # admin.site.site_header = "H2H Admin Panel"
-# # admin.site.site_title = "H2H Admin"
-# # admin.site.index_title = "Welcome to H2H Admin"
-
-
-# # @admin.register(UserProfile)
-# # class UserProfileAdmin(admin.ModelAdmin):
-# #     list_display = (
-# #         "user",
-# #         "cognito_sub",
-# #         "full_name",
-# #         "gender",
-# #         "phone_number",
-# #         "email_verified",
-# #         "phone_number_verified",
-# #         "updated_at",
-# #     )
-# #     search_fields = (
-# #         "user__username",
-# #         "user__email",
-# #         "cognito_sub",
-# #         "full_name",
-# #         "phone_number",
-# #     )
-
-
-# # @admin.register(Package)
-# # class PackageAdmin(admin.ModelAdmin):
-# #     list_display = ("name", "price_inr", "active")
-# #     list_filter = ("active",)
-# #     search_fields = ("name",)
-
-
-# # @admin.register(Order)
-# # class OrderAdmin(admin.ModelAdmin):
-# #     list_display = (
-# #         "id",
-# #         "user",
-# #         "package",
-# #         "razorpay_order_id",
-# #         "razorpay_payment_id",
-# #         "paid",
-# #         "amount",
-# #         "currency",
-# #         "created_at",
-# #     )
-# #     list_filter = ("paid", "currency", "created_at")
-# #     search_fields = (
-# #         "razorpay_order_id",
-# #         "razorpay_payment_id",
-# #         "user__username",
-# #         "user__email",
-# #     )
-
-
-# # @admin.register(WebhookEvent)
-# # class WebhookEventAdmin(admin.ModelAdmin):
-# #     list_display = ("id", "provider", "event", "processed_ok", "matched_order", "created_at")
-# #     list_filter = ("provider", "processed_ok", "event", "created_at")
-# #     search_fields = ("event", "signature", "delivery_id", "matched_order__razorpay_order_id")
-    
-    
-    
-# # @admin.register(Property)
-# # class PropertyAdmin(admin.ModelAdmin):
-# #     list_display = ("name", "slug")
-# #     search_fields = ("name",)
-
-# # @admin.register(UnitType)
-# # class UnitTypeAdmin(admin.ModelAdmin):
-# #     list_display = ("name", "code")
-# #     search_fields = ("name", "code")
-
-# # @admin.register(Unit)
-# # class UnitAdmin(admin.ModelAdmin):
-# #     list_display = ("property", "unit_type", "category", "label", "capacity", "status")
-# #     list_filter = ("property", "unit_type", "category", "status")
-# #     search_fields = ("label", "features")
-
-# # @admin.register(Booking)
-# # class BookingAdmin(admin.ModelAdmin):
-# #     list_display = ("id", "user", "property", "unit_type", "category", "check_in", "check_out", "guests", "status")
-# #     list_filter = ("property", "unit_type", "category", "status")
-# #     search_fields = ("id", "user__username")
-
-# # @admin.register(Allocation)
-# # class AllocationAdmin(admin.ModelAdmin):
-# #     list_display = ("booking", "unit", "created_at")
-# #     list_filter = ("unit__property", "unit__unit_type", "unit__category")
-    
-
-# # @admin.register(Event)
-# # class EventAdmin(admin.ModelAdmin):
-# #     list_display = ("name", "year", "start_date", "end_date", "active", "booking_open")
-# #     list_filter = ("active", "booking_open", "year")
-# #     search_fields = ("name", "location", "description")
-
-# # @admin.register(EventDay)
-# # class EventDayAdmin(admin.ModelAdmin):
-# #     list_display = ("event", "order", "date", "title")
-# #     list_filter = ("event",)
-# #     search_fields = ("title", "subtitle", "description")
-
-
-
-# from django.contrib import admin
-# from django.http import HttpResponse
-# from .models import (
-#     UserProfile, Package, Order, WebhookEvent,
-#     Property, UnitType, Unit,
-#     Booking, Allocation,
-#     Event, EventDay,
-#     InventoryRow,
-# )
-
-# from django import forms
-# from django.urls import path
-# from django.shortcuts import render, redirect
-# from django.contrib import messages
-# from django.db import transaction
-# from django.utils.text import slugify
-# import csv, io, re
-
-
-# admin.site.site_header = "H2H Admin Panel"
-# admin.site.site_title = "H2H Admin"
-# admin.site.index_title = "Welcome to H2H Admin"
-
-
-# # ----------------------------
-# # Basic models
-# # ----------------------------
-# @admin.register(UserProfile)
-# class UserProfileAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "user", "cognito_sub", "full_name", "gender", "phone_number",
-#         "email_verified", "phone_number_verified", "updated_at",
-#     )
-#     search_fields = ("user__username", "user__email", "cognito_sub", "full_name", "phone_number")
-
-
-# @admin.register(Package)
-# class PackageAdmin(admin.ModelAdmin):
-#     list_display = ("name", "price_inr", "active", "base_includes", "extra_price_adult_inr",
-#                     "child_free_max_age", "child_half_max_age", "child_half_multiplier")
-#     list_filter = ("active",)
-#     search_fields = ("name",)
-#     fieldsets = (
-#         (None, {"fields": ("name", "description", "active")}),
-#         ("Pricing", {
-#             "fields": ("price_inr", "base_includes", "extra_price_adult_inr",
-#                        "child_free_max_age", "child_half_max_age", "child_half_multiplier"),
-#             "description": "Base price includes 'base_includes' people. "
-#                            "Extras: adult uses 'extra_price_adult_inr'. "
-#                            "Child ≤ free_max -> free; ≤ half_max -> multiplier of adult price."
-#         }),
-#     )
-
-
-# @admin.register(Order)
-# class OrderAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "id", "user", "package", "razorpay_order_id", "razorpay_payment_id",
-#         "paid", "amount", "currency", "created_at",
-#     )
-#     list_filter = ("paid", "currency", "created_at")
-#     search_fields = ("razorpay_order_id", "razorpay_payment_id", "user__username", "user__email")
-
-
-# @admin.register(WebhookEvent)
-# class WebhookEventAdmin(admin.ModelAdmin):
-#     list_display = ("id", "provider", "event", "processed_ok", "matched_order", "created_at")
-#     list_filter = ("provider", "processed_ok", "event", "created_at")
-#     search_fields = ("event", "signature", "delivery_id", "matched_order__razorpay_order_id")
-
-
-# @admin.register(Property)
-# class PropertyAdmin(admin.ModelAdmin):
-#     list_display = ("name", "slug")
-#     search_fields = ("name",)
-
-
-# @admin.register(UnitType)
-# class UnitTypeAdmin(admin.ModelAdmin):
-#     list_display = ("name", "code")
-#     search_fields = ("name", "code")
-
-
-# @admin.register(Event)
-# class EventAdmin(admin.ModelAdmin):
-#     list_display = ("name", "year", "start_date", "end_date", "active", "booking_open")
-#     list_filter = ("active", "booking_open", "year")
-#     search_fields = ("name", "location", "description")
-
-
-# @admin.register(EventDay)
-# class EventDayAdmin(admin.ModelAdmin):
-#     list_display = ("event", "order", "date", "title")
-#     list_filter = ("event",)
-#     search_fields = ("title", "subtitle", "description")
-
-
-# @admin.register(Booking)
-# class BookingAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "id", "user", "event", "property", "unit_type", "category",
-#         "guests", "extra_adults", "extra_children_half", "extra_children_free",
-#         "pricing_total_inr", "status", "created_at",
-#     )
-#     list_filter = ("event", "property", "unit_type", "category", "status")
-#     search_fields = ("id", "user__username", "user__email")
-#     readonly_fields = ("pricing_total_inr", "pricing_breakdown")
-#     fieldsets = (
-#         ("Core", {"fields": ("user", "event", "order", "status")}),
-#         ("Inventory Slice", {"fields": ("property", "unit_type", "category")}),
-#         ("Dates", {"fields": ("check_in", "check_out")}),
-#         ("Guests", {"fields": ("guests", "guest_ages", "extra_adults", "extra_children_half", "extra_children_free")}),
-#         ("Safety", {"fields": ("blood_group", "emergency_contact_name", "emergency_contact_phone")}),
-#         ("Pricing Snapshot", {"fields": ("pricing_total_inr", "pricing_breakdown")}),
-#     )
-
-
-# @admin.register(Allocation)
-# class AllocationAdmin(admin.ModelAdmin):
-#     list_display = ("booking", "unit", "created_at")
-#     list_filter = ("unit__property", "unit__unit_type", "unit__category")
-
-
-# # ----------------------------
-# # Unit CSV importer (kept)
-# # ----------------------------
-# STATUS_MAP = {
-#     "available": "AVAILABLE", "avail": "AVAILABLE", "a": "AVAILABLE",
-#     "hold": "HOLD", "h": "HOLD",
-#     "occupied": "OCCUPIED", "o": "OCCUPIED",
-#     "maintenance": "MAINTENANCE", "m": "MAINTENANCE",
-#     "": "AVAILABLE", None: "AVAILABLE",
-# }
-# def _norm(s): return "" if s is None else str(s).strip()
-# def _norm_category(s): return _norm(s).upper()
-# def _norm_status(s): return STATUS_MAP.get(_norm(s).lower(), "AVAILABLE")
-# def _safe_int(v, default=2):
-#     try:
-#         iv = int(float(v)); return max(1, iv)
-#     except Exception:
-#         return default
-
-# def _code_from_name(name):
-#     parts = re.findall(r"[A-Za-z0-9]+", (name or "").upper())
-#     if not parts:
-#         code = "UT"
-#     else:
-#         code = "".join(p[:1] for p in parts)[:3] or "UT"
-#     base, i = code, 1
-#     from .models import UnitType
-#     while UnitType.objects.filter(code=code).exists():
-#         code = f"{base}{i}"
-#         i += 1
-#     return code
-
-
-# class InventoryCSVUploadForm(forms.Form):
-#     csv_file = forms.FileField(
-#         help_text="CSV headers (case-insensitive): property, unit_type, category, label, capacity, status, features"
-#     )
-#     default_property = forms.CharField(
-#         required=False,
-#         help_text="Used if 'property' column is missing/empty."
-#     )
-#     prune = forms.BooleanField(
-#         required=False, initial=False,
-#         help_text="Delete Units in these Properties that are NOT present in this file."
-#     )
-
-
-# @admin.register(Unit)
-# class UnitAdmin(admin.ModelAdmin):
-#     list_display = ("property", "unit_type", "category", "label", "capacity", "status")
-#     list_filter = ("property", "unit_type", "category", "status")
-#     search_fields = ("label", "features")
-#     change_list_template = "admin/change_list.html"  # default
-
-#     def get_urls(self):
-#         urls = super().get_urls()
-#         my = [
-#             path("import-inventory/", self.admin_site.admin_view(self.import_inventory_view),
-#                  name="h2h_unit_import_inventory"),
-#             path("import-inventory/sample/", self.admin_site.admin_view(self.import_sample_view),
-#                  name="h2h_unit_import_sample"),
-#         ]
-#         return my + urls
-
-#     def import_sample_view(self, request):
-#         sample = (
-#             "property,unit_type,category,label,capacity,status,features\r\n"
-#             "Mystic Meadow,COTTAGE,DELUXE,C1,3,available,Lake view\r\n"
-#             "Mystic Meadow,SWISS TENT,NORMAL,ST-01,2,occupied,Near stage\r\n"
-#             "Mystic Meadow,DOME TENT,NORMAL,DT-A3,2,hold,\r\n"
-#         )
-#         resp = HttpResponse(sample, content_type="text/csv")
-#         resp["Content-Disposition"] = 'attachment; filename="inventory_sample.csv"'
-#         return resp
-
-#     def import_inventory_view(self, request):
-#         from .models import Property, UnitType, Unit  # local import
-
-#         if request.method == "POST":
-#             form = InventoryCSVUploadForm(request.POST, request.FILES)
-#             if form.is_valid():
-#                 f = form.cleaned_data["csv_file"]
-#                 default_property = form.cleaned_data.get("default_property") or ""
-#                 prune = bool(form.cleaned_data.get("prune"))
-
-#                 try:
-#                     text = f.read().decode("utf-8-sig")
-#                 except Exception:
-#                     text = f.read().decode("utf-8")
-
-#                 reader = csv.DictReader(io.StringIO(text))
-#                 headers = [h.strip().lower() for h in (reader.fieldnames or [])]
-#                 if "label" not in headers:
-#                     messages.error(request, "CSV must include a 'label' column.")
-#                     return redirect("..")
-
-#                 created_props = created_utypes = created_units = updated_units = 0
-#                 touched_props = set()
-#                 seen_labels_per_prop = {}
-
-#                 try:
-#                     with transaction.atomic():
-#                         for row in reader:
-#                             prop_name = _norm(row.get("property") or default_property)
-#                             utype_name = _norm(row.get("unit_type"))
-#                             category = _norm_category(row.get("category"))
-#                             label = _norm(row.get("label"))
-#                             capacity = _safe_int(row.get("capacity"), default=2)
-#                             status = _norm_status(row.get("status"))
-#                             features = _norm(row.get("features"))
-
-#                             if not prop_name:
-#                                 raise ValueError("Missing property (supply column or default_property).")
-#                             if not utype_name:
-#                                 raise ValueError("Missing unit_type.")
-#                             if not label:
-#                                 raise ValueError("Missing label.")
-
-#                             prop, p_created = Property.objects.get_or_create(
-#                                 name=prop_name, defaults={"slug": slugify(prop_name)}
-#                             )
-#                             if p_created:
-#                                 created_props += 1
-#                             touched_props.add(prop.id)
-#                             seen_labels_per_prop.setdefault(prop.id, set()).add(label)
-
-#                             utype = UnitType.objects.filter(name__iexact=utype_name).first()
-#                             if not utype:
-#                                 utype = UnitType.objects.create(
-#                                     name=utype_name.upper(), code=_code_from_name(utype_name)
-#                                 )
-#                                 created_utypes += 1
-
-#                             unit, u_created = Unit.objects.get_or_create(
-#                                 property=prop,
-#                                 label=label,
-#                                 defaults={
-#                                     "unit_type": utype,
-#                                     "category": category,
-#                                     "capacity": capacity,
-#                                     "features": features,
-#                                     "status": status,
-#                                 }
-#                             )
-#                             if u_created:
-#                                 created_units += 1
-#                             else:
-#                                 changed = False
-#                                 if unit.unit_type_id != utype.id:
-#                                     unit.unit_type = utype; changed = True
-#                                 if (unit.category or "") != category:
-#                                     unit.category = category; changed = True
-#                                 if (unit.capacity or 0) != capacity:
-#                                     unit.capacity = capacity; changed = True
-#                                 if (unit.features or "") != features:
-#                                     unit.features = features; changed = True
-#                                 if (unit.status or "") != status:
-#                                     unit.status = status; changed = True
-#                                 if changed:
-#                                     unit.save()
-#                                     updated_units += 1
-
-#                         if prune:
-#                             deleted = 0
-#                             for pid in touched_props:
-#                                 labels_seen = seen_labels_per_prop.get(pid, set())
-#                                 qs = Unit.objects.filter(property_id=pid).exclude(label__in=labels_seen)
-#                                 cnt = qs.count()
-#                                 if cnt:
-#                                     qs.delete()
-#                                     deleted += cnt
-#                             messages.warning(request, f"Pruned {deleted} units not present in this CSV.")
-
-#                     messages.success(
-#                         request,
-#                         f"Import completed: Properties +{created_props}, UnitTypes +{created_utypes}, "
-#                         f"Units +{created_units}/~{updated_units}."
-#                     )
-#                     return redirect("..")
-
-#                 except Exception as e:
-#                     messages.error(request, f"Import failed: {e}")
-#                     return redirect("..")
-
-#         else:
-#             form = InventoryCSVUploadForm()
-
-#         context = dict(
-#             self.admin_site.each_context(request),
-#             title="Import inventory (CSV)",
-#             form=form,
-#             opts=self.model._meta,
-#             sample_url="admin:h2h_unit_import_sample",
-#         )
-#         return render(request, "admin/inventory_rows_import.html", context)
-
-
-# # -----------------------------------------
-# # Aggregated InventoryRow CSV importer
-# # -----------------------------------------
-# def _abbr_for_unit_type(name: str) -> str:
-#     n = (name or "").strip().upper()
-#     if "DOME" in n and "TENT" in n:
-#         return "DT"
-#     if "SWISS" in n and "TENT" in n:
-#         return "ST"
-#     if "COTTAGE" in n:
-#         return "CT"
-#     if "HUT" in n:
-#         return "HUT"
-#     parts = re.findall(r"[A-Z0-9]+", n)
-#     return "".join(p[:1] for p in parts)[:3] or "UT"
-
-
-# def _next_label_start(prop, utype, category: str, abbr: str) -> int:
-#     """
-#     Find the next numeric suffix for labels like 'ST-N001', 'DT-L002', etc.
-#     Pattern base: {abbr}-{cat_initial}{NNN}
-#     """
-#     cat_initial = (category or "X")[:1].upper()
-#     base = f"{abbr}-{cat_initial}"
-#     existing = Unit.objects.filter(
-#         property=prop, unit_type=utype, category=category, label__startswith=base
-#     ).values_list("label", flat=True)
-#     max_n = 0
-#     for lbl in existing:
-#         m = re.match(rf"^{re.escape(base)}(\d+)$", lbl)
-#         if m:
-#             try:
-#                 max_n = max(max_n, int(m.group(1)))
-#             except ValueError:
-#                 pass
-#     return max_n + 1
-
-
-# def _materialize_units_for_row(prop, utype, category: str,
-#                                quantity: int, capacity: int, features: str,
-#                                prune_extras: bool = False) -> tuple[int, int]:
-#     """
-#     Ensure exactly `quantity` Unit rows exist for this slice.
-#     Create missing with auto labels & set capacity/features.
-#     If prune_extras=True, delete extras beyond quantity.
-#     Returns: (created_count, updated_count)
-#     """
-#     category = (category or "").upper()
-#     current_qs = Unit.objects.filter(property=prop, unit_type=utype, category=category).order_by("label")
-#     current = list(current_qs)
-#     created = updated = 0
-
-#     if len(current) > quantity and prune_extras:
-#         extras = current[quantity:]
-#         Unit.objects.filter(id__in=[u.id for u in extras]).delete()
-#         current = current[:quantity]
-
-#     if len(current) < quantity:
-#         abbr = _abbr_for_unit_type(utype.name)
-#         start = _next_label_start(prop, utype, category, abbr)
-#         for i in range(start, start + (quantity - len(current))):
-#             label = f"{abbr}-{(category or 'X')[:1].upper()}{i:03d}"
-#             Unit.objects.create(
-#                 property=prop,
-#                 unit_type=utype,
-#                 category=category,
-#                 label=label,
-#                 capacity=capacity or 1,
-#                 features=features or "",
-#                 status="AVAILABLE",
-#             )
-#             created += 1
-#         current = list(Unit.objects.filter(property=prop, unit_type=utype, category=category).order_by("label"))
-
-#     for u in current:
-#         ch = False
-#         if (u.capacity or 0) != (capacity or 1):
-#             u.capacity = capacity or 1; ch = True
-#         if (u.features or "") != (features or ""):
-#             u.features = features or ""; ch = True
-#         if ch:
-#             u.save(update_fields=["capacity", "features"])
-#             updated += 1
-
-#     return created, updated
-
-
-# class InventoryRowsCSVForm(forms.Form):
-#     csv_file = forms.FileField(
-#         help_text="CSV headers must be exactly: PROPERTY, TYPE, CATEGORY, NO OF TENT, PEOPLE SHARE PER ROOM, facility"
-#     )
-#     materialize_units = forms.BooleanField(
-#         required=False,
-#         initial=True,
-#         help_text="Create/adjust individual Unit rows to match quantities (recommended)."
-#     )
-#     prune_units = forms.BooleanField(
-#         required=False,
-#         initial=False,
-#         help_text="If enabled, delete extra Units beyond the quantity in CSV (for touched rows only)."
-#     )
-
-
-# @admin.register(InventoryRow)
-# class InventoryRowAdmin(admin.ModelAdmin):
-#     list_display = ("property", "unit_type", "category", "quantity", "capacity_per_unit", "total_capacity", "facility")
-#     list_filter  = ("property", "unit_type", "category")
-#     search_fields = ("property__name", "unit_type__name", "category", "facility")
-#     # Show an Import CSV button at top of list (requires template file)
-#     change_list_template = "admin/change_list.html"
-
-#     def get_urls(self):
-#         urls = super().get_urls()
-#         my = [
-#             path("import/", self.admin_site.admin_view(self.import_rows_view), name="h2h_inventoryrow_import"),
-#             path("sample/", self.admin_site.admin_view(self.sample_rows_view), name="h2h_inventoryrow_sample"),
-#         ]
-#         return my + urls
-
-#     def sample_rows_view(self, request):
-#         # Your exact sample format (facility value is quoted to preserve commas)
-#         sample = (
-#             'PROPERTY,TYPE,CATEGORY,NO OF TENT,PEOPLE SHARE PER ROOM,facility\r\n'
-#             'BANJARA,DOME TENT,NORMAL,5,2,"pillow,mattress, sharing blankets, light & charging poin, comon wash room(5 male & 5 female)"\r\n'
-#             'BANJARA,SWISS TENT,LUXURY,22,4,"IRON BED, Sharing blanketss, mini cooler, attuch bathroom"\r\n'
-#             'BANJARA,SWISS TENT,B TYPE,2,6,"IRON BED, Sharing blanketss, mini cooler, attuch bathroom"\r\n'
-#             'BANJARA,SWISS TENT,C TYPE,9,4,"IRON BED, Sharing blanketss, mini cooler, attuch bathroom"\r\n'
-#         )
-#         resp = HttpResponse(sample, content_type="text/csv")
-#         resp["Content-Disposition"] = 'attachment; filename="inventory_rows_sample.csv"'
-#         return resp
-
-#     def import_rows_view(self, request):
-#         if request.method == "POST":
-#             form = InventoryRowsCSVForm(request.POST, request.FILES)
-#             if form.is_valid():
-#                 f = form.cleaned_data["csv_file"]
-#                 materialize = bool(form.cleaned_data.get("materialize_units"))
-#                 prune = bool(form.cleaned_data.get("prune_units"))
-
-#                 raw = f.read()
-#                 try:
-#                     text = raw.decode("utf-8-sig")
-#                 except Exception:
-#                     text = raw.decode("utf-8")
-
-#                 # Use csv module; default delimiter is comma
-#                 reader = csv.DictReader(io.StringIO(text))
-#                 headers = [h.strip() for h in (reader.fieldnames or [])]
-
-#                 required = ["PROPERTY", "TYPE", "CATEGORY", "NO OF TENT", "PEOPLE SHARE PER ROOM", "facility"]
-#                 missing = [h for h in required if h not in headers]
-#                 if missing:
-#                     messages.error(request, f"Missing required column(s): {', '.join(missing)}")
-#                     return redirect("..")
-
-#                 created_rows = updated_rows = 0
-#                 created_units = updated_units = 0
-
-#                 try:
-#                     with transaction.atomic():
-#                         for idx, row in enumerate(reader, start=2):  # header is line 1
-#                             prop_name = (row.get("PROPERTY") or "").strip()
-#                             utype_name = (row.get("TYPE") or "").strip()
-#                             category   = (row.get("CATEGORY") or "").strip()
-#                             qty_raw    = (row.get("NO OF TENT") or "0").strip()
-#                             cap_raw    = (row.get("PEOPLE SHARE PER ROOM") or "1").strip()
-#                             facility   = (row.get("facility") or "").strip()
-
-#                             if not prop_name or not utype_name:
-#                                 messages.error(request, f"Row {idx}: PROPERTY and TYPE are required.")
-#                                 raise ValueError("bad row")
-
-#                             try:
-#                                 quantity = max(0, int(float(qty_raw)))
-#                             except Exception:
-#                                 messages.error(request, f"Row {idx}: NO OF TENT must be numeric.")
-#                                 raise
-
-#                             try:
-#                                 capacity = max(1, int(float(cap_raw)))
-#                             except Exception:
-#                                 messages.error(request, f"Row {idx}: PEOPLE SHARE PER ROOM must be numeric.")
-#                                 raise
-
-#                             prop, _ = Property.objects.get_or_create(
-#                                 name=prop_name, defaults={"slug": slugify(prop_name)}
-#                             )
-#                             utype = UnitType.objects.filter(name__iexact=utype_name).first()
-#                             if not utype:
-#                                 utype = UnitType.objects.create(
-#                                     name=utype_name,
-#                                     code=_code_from_name(utype_name),
-#                                 )
-
-#                             ir, was_created = InventoryRow.objects.get_or_create(
-#                                 property=prop,
-#                                 unit_type=utype,
-#                                 category=category,
-#                                 defaults={
-#                                     "quantity": quantity,
-#                                     "capacity_per_unit": capacity,
-#                                     "facility": facility,
-#                                 }
-#                             )
-#                             if was_created:
-#                                 created_rows += 1
-#                             else:
-#                                 ch = False
-#                                 if ir.quantity != quantity:
-#                                     ir.quantity = quantity; ch = True
-#                                 if ir.capacity_per_unit != capacity:
-#                                     ir.capacity_per_unit = capacity; ch = True
-#                                 if (ir.facility or "") != facility:
-#                                     ir.facility = facility; ch = True
-#                                 if ch:
-#                                     ir.save()
-#                                     updated_rows += 1
-
-#                             if materialize:
-#                                 c, u = _materialize_units_for_row(
-#                                     prop=prop, utype=utype, category=category,
-#                                     quantity=quantity, capacity=capacity, features=facility,
-#                                     prune_extras=prune,
-#                                 )
-#                                 created_units += c
-#                                 updated_units += u
-
-#                     msg = f"Imported rows: +{created_rows}/~{updated_rows}."
-#                     if materialize:
-#                         msg += f" Units created: {created_units}, updated: {updated_units}"
-#                         if prune:
-#                             msg += " (pruned extras)."
-#                     messages.success(request, msg)
-#                     return redirect("..")
-
-#                 except Exception as e:
-#                     messages.error(request, f"Import failed: {e}")
-#                     return redirect("..")
-#         else:
-#             form = InventoryRowsCSVForm()
-
-#         context = dict(
-#             self.admin_site.each_context(request),
-#             title="Import inventory rows (CSV)",
-#             form=form,
-#             opts=self.model._meta,
-#         )
-#         # requires templates/admin/inventory_row_import.html (shared earlier)
-#         return render(request, "admin/inventory_rows_import.html", context)
-
-
 # admin.py
 from django.contrib import admin
 from django.http import HttpResponse
@@ -695,6 +15,7 @@ from .models import (
     Booking, Allocation,
     Event, EventDay,
     InventoryRow,
+    PromoCode,
 )
 
 admin.site.site_header = "H2H Admin Panel"
@@ -782,31 +103,71 @@ class EventDayAdmin(admin.ModelAdmin):
     search_fields = ("title", "subtitle", "description")
 
 
+@admin.register(PromoCode)  # ADD
+class PromoCodeAdmin(admin.ModelAdmin):
+    list_display = ("code", "kind", "value", "is_active", "start_date", "end_date")
+    list_filter  = ("kind", "is_active")
+    search_fields = ("code", "description")
+    fieldsets = (
+        (None, {"fields": ("code", "description")}),
+        ("Discount", {"fields": ("kind", "value")}),
+        ("Availability", {"fields": ("is_active", "start_date", "end_date")}),
+    )
+    def get_readonly_fields(self, request, obj=None):
+        # keep fully editable; adjust if you want code immutable after creation
+        return ()
+    
+    
+
+# @admin.register(Booking)
+# class BookingAdmin(admin.ModelAdmin):
+#     list_display = (
+#         "id", "user", "event", "property", "unit_type", "category",
+#         "guests", "extra_adults", "extra_children_half", "extra_children_free",
+#         "pricing_total_inr", "status", "created_at",
+#     )
+#     list_filter = ("event", "property", "unit_type", "category", "status")
+#     search_fields = ("id", "user__username", "user__email")
+#     readonly_fields = ("pricing_total_inr", "pricing_breakdown")
+#     fieldsets = (
+#         ("Core", {"fields": ("user", "event", "order", "status")}),
+#         ("Inventory Slice", {"fields": ("property", "unit_type", "category")}),
+#         ("Dates", {"fields": ("check_in", "check_out")}),
+#         ("Guests", {
+#             "fields": (
+#                 "guests", "guest_ages",
+#                 "extra_adults", "extra_children_half", "extra_children_free",
+#             )
+#         }),
+#         ("Safety", {"fields": ("blood_group", "emergency_contact_name", "emergency_contact_phone")}),
+#         ("Pricing Snapshot", {"fields": ("pricing_total_inr", "pricing_breakdown")}),
+#     )
+
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
     list_display = (
         "id", "user", "event", "property", "unit_type", "category",
-        "guests", "extra_adults", "extra_children_half", "extra_children_free",
-        "pricing_total_inr", "status", "created_at",
+        "guests", "pricing_total_inr", "status",
+        "promo_code", "promo_discount_inr",  # ADD
+        "created_at",
     )
     list_filter = ("event", "property", "unit_type", "category", "status")
     search_fields = ("id", "user__username", "user__email")
-    readonly_fields = ("pricing_total_inr", "pricing_breakdown")
+    readonly_fields = ("pricing_total_inr", "pricing_breakdown", "promo_breakdown")  # ADD
     fieldsets = (
         ("Core", {"fields": ("user", "event", "order", "status")}),
         ("Inventory Slice", {"fields": ("property", "unit_type", "category")}),
         ("Dates", {"fields": ("check_in", "check_out")}),
-        ("Guests", {
-            "fields": (
-                "guests", "guest_ages",
-                "extra_adults", "extra_children_half", "extra_children_free",
-            )
-        }),
+        ("Guests", {"fields": ("guests", "guest_ages", "extra_adults", "extra_children_half", "extra_children_free")}),
         ("Safety", {"fields": ("blood_group", "emergency_contact_name", "emergency_contact_phone")}),
         ("Pricing Snapshot", {"fields": ("pricing_total_inr", "pricing_breakdown")}),
+        ("Promotion", {  # ADD
+            "fields": ("promo_code", "promo_discount_inr", "promo_breakdown"),
+            "description": "Snapshot captured at order creation.",
+        }),
     )
-
-
+    
+    
 @admin.register(Allocation)
 class AllocationAdmin(admin.ModelAdmin):
     list_display = ("booking", "unit", "created_at")
