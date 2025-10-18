@@ -1,7 +1,119 @@
+# from rest_framework import serializers
+# from django.contrib.auth.models import User
+# from .models import Package, Order, UserProfile, Property, UnitType, Unit, Booking, Allocation, Event, EventDay
+
+
+# class UserProfileSerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = UserProfile
+#         fields = (
+#             "cognito_sub",
+#             "full_name",
+#             "gender",
+#             "phone_number",
+#             "address",
+#             "email_verified",
+#             "phone_number_verified",
+#         )
+
+
+# class UserSerializer(serializers.ModelSerializer):
+#     profile = UserProfileSerializer(read_only=True)
+
+#     class Meta:
+#         model = User
+#         fields = ["id", "username", "email", "first_name", "last_name", "profile"]
+
+
+# class PackageSerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = Package
+#         fields = ["id", "name", "description", "price_inr", "active"]
+
+
+# class OrderSerializer(serializers.ModelSerializer):
+#     package = PackageSerializer(read_only=True)
+
+#     class Meta:
+#         model = Order
+#         fields = [
+#             "id",
+#             "package",
+#             "razorpay_order_id",
+#             "razorpay_payment_id",
+#             "razorpay_signature",
+#             "amount",
+#             "currency",
+#             "paid",
+#             "created_at",
+#         ]
+#         read_only_fields = [
+#             "razorpay_order_id",
+#             "razorpay_payment_id",
+#             "razorpay_signature",
+#             "paid",
+#             "created_at",
+#         ]
+
+# class PropertySerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = Property
+#         fields = ["id", "name", "slug", "address"]
+
+
+# class UnitTypeSerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = UnitType
+#         fields = ["id", "name", "code"]
+
+
+# class UnitSerializer(serializers.ModelSerializer):
+#     property = PropertySerializer(read_only=True)
+#     unit_type = UnitTypeSerializer(read_only=True)
+
+#     class Meta:
+#         model = Unit
+#         fields = ["id", "property", "unit_type", "category", "label", "capacity", "features", "status"]
+
+# class EventDaySerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = EventDay
+#         fields = ["id", "date", "title", "subtitle", "description", "order"]
+
+# class EventSerializer(serializers.ModelSerializer):
+#     days = EventDaySerializer(many=True, read_only=True)
+#     class Meta:
+#         model = Event
+#         fields = ["id", "name", "slug", "year", "start_date", "end_date", "location", "description", "active", "booking_open", "days"]
+
+# # Update BookingSerializer:
+# class BookingSerializer(serializers.ModelSerializer):
+#     property = PropertySerializer(read_only=True)
+#     unit_type = UnitTypeSerializer(read_only=True)
+#     event = EventSerializer(read_only=True)
+
+#     class Meta:
+#         model = Booking
+#         fields = [
+#             "id", "order", "user", "event", "property", "unit_type", "category",
+#             "check_in", "check_out", "guests", "status", "created_at"
+#         ]
+#         read_only_fields = ["status", "created_at"]
+
+
+
+
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import Package, Order, UserProfile
+from .models import (
+    Package, Order, UserProfile,
+    Property, UnitType, Unit,
+    Booking, Allocation,
+    Event, EventDay,
+    InventoryRow,  # NEW
+)
 
+# --- Users ---
 
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
@@ -16,24 +128,28 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "phone_number_verified",
         )
 
-
 class UserSerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer(read_only=True)
-
     class Meta:
         model = User
         fields = ["id", "username", "email", "first_name", "last_name", "profile"]
 
+# --- Catalog / Pricing ---
 
 class PackageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Package
-        fields = ["id", "name", "description", "price_inr", "active"]
+        fields = [
+            "id", "name", "description", "price_inr", "active",
+            # pricing knobs (single-person base + extras)
+            "base_includes", "extra_price_adult_inr",
+            "child_free_max_age", "child_half_max_age", "child_half_multiplier",
+        ]
 
+# --- Orders ---
 
 class OrderSerializer(serializers.ModelSerializer):
     package = PackageSerializer(read_only=True)
-
     class Meta:
         model = Order
         fields = [
@@ -42,7 +158,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "razorpay_order_id",
             "razorpay_payment_id",
             "razorpay_signature",
-            "amount",
+            "amount",          # NOTE: in paise (as per model)
             "currency",
             "paid",
             "created_at",
@@ -54,3 +170,88 @@ class OrderSerializer(serializers.ModelSerializer):
             "paid",
             "created_at",
         ]
+
+# --- Inventory building blocks ---
+
+class PropertySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Property
+        fields = ["id", "name", "slug", "address"]
+
+class UnitTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UnitType
+        fields = ["id", "name", "code"]
+
+class UnitSerializer(serializers.ModelSerializer):
+    property = PropertySerializer(read_only=True)
+    unit_type = UnitTypeSerializer(read_only=True)
+    class Meta:
+        model = Unit
+        fields = ["id", "property", "unit_type", "category", "label", "capacity", "features", "status"]
+
+# --- NEW: Aggregated Inventory (exactly your CSV shape) ---
+
+class InventoryRowSerializer(serializers.ModelSerializer):
+    property = PropertySerializer(read_only=True)
+    unit_type = UnitTypeSerializer(read_only=True)
+    total_capacity = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = InventoryRow
+        fields = [
+            "id",
+            "property",         # PROPERTY
+            "unit_type",        # TYPE
+            "category",         # CATEGORY
+            "quantity",         # NO OF TENT
+            "capacity_per_unit",# PEOPLE SHARE PER ROOM
+            "facility",         # facility
+            "total_capacity",   # computed (quantity * capacity_per_unit)
+        ]
+
+# If you ever need a flat serializer (IDs instead of nested) for POST/PUT via API, you can add:
+class InventoryRowWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InventoryRow
+        fields = [
+            "id", "property", "unit_type", "category",
+            "quantity", "capacity_per_unit", "facility",
+        ]
+
+# --- Event / Days ---
+
+class EventDaySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EventDay
+        fields = ["id", "date", "title", "subtitle", "description", "order"]
+
+class EventSerializer(serializers.ModelSerializer):
+    days = EventDaySerializer(many=True, read_only=True)
+    class Meta:
+        model = Event
+        fields = [
+            "id", "name", "slug", "year", "start_date", "end_date",
+            "location", "description", "active", "booking_open", "days"
+        ]
+
+# --- Booking ---
+
+class BookingSerializer(serializers.ModelSerializer):
+    property = PropertySerializer(read_only=True)
+    unit_type = UnitTypeSerializer(read_only=True)
+    event = EventSerializer(read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = [
+            "id", "order", "user", "event", "property", "unit_type", "category",
+            "check_in", "check_out", "guests",
+            # safety info
+            "blood_group", "emergency_contact_name", "emergency_contact_phone",
+            # guest/pricing info
+            "guest_ages", "extra_adults", "extra_children_half", "extra_children_free",
+            "pricing_total_inr", "pricing_breakdown",
+            "status", "created_at",
+        ]
+        read_only_fields = ["status", "created_at", "pricing_total_inr", "pricing_breakdown"]
