@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path("", views.api_docs, name="api_docs"),
     path("health/", views.health, name="health"),
     path("auth/sso/authorize", views.sso_authorize, name="sso_authorize"),
     path("auth/sso/callback", views.sso_callback, name="sso_callback"),
@@ -12,5 +13,5 @@ urlpatterns = [
     path("tickets/<str:razorpay_order_id>.pdf", views.ticket_pdf, name="ticket_pdf"),
     path("inventory/availability", views.availability, name="availability"),
     path("bookings/create", views.create_booking, name="create_booking"),
-    path("promocodes/validate", views.validate_promocode, name="validate_promocode"),  # ADD
+    path("promocodes/validate", views.validate_promocode, name="validate_promocode"),
 ]

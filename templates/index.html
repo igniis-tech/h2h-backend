@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>H2H API – Interactive Docs</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tailwind via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Prism for code highlighting -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+  <style>
+    .badge { @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium; }
+    .badge-method { @apply bg-slate-800 text-white; }
+    .badge-auth { @apply bg-emerald-100 text-emerald-700; }
+    .badge-noauth { @apply bg-slate-100 text-slate-700; }
+    .card { @apply bg-white rounded-2xl shadow border border-slate-100; }
+    .copy-btn { @apply absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-800 text-white hover:bg-black; }
+    .endpoint { scroll-margin-top: 100px; }
+    .kbd { @apply bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200 text-[11px]; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <!-- Header -->
+  <header class="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-slate-200">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
+      <div class="flex items-center gap-3">
+        <div class="h-9 w-9 rounded-xl bg-slate-900 text-white grid place-items-center font-bold">H2H</div>
+        <h1 class="text-lg md:text-xl font-semibold">H2H API – Interactive Documentation</h1>
+      </div>
+      <nav class="ml-auto hidden md:flex items-center gap-6 text-sm">
+        <a href="#overview" class="hover:text-slate-700">Overview</a>
+        <a href="#endpoints" class="hover:text-slate-700">Endpoints</a>
+        <a href="#examples" class="hover:text-slate-700">Examples</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
+    <!-- Overview / Base URL -->
+    <section id="overview" class="card p-6">
+      <div class="flex flex-col md:flex-row md:items-start gap-6">
+        <div class="md:w-2/3">
+          <h2 class="text-2xl font-semibold">Overview</h2>
+          <p class="mt-2 text-slate-600">
+            This is the REST API for <span class="font-medium">Highway to Heal</span> bookings, payments, inventory, events, and authentication.
+            Use the controls on the right to set your Base URL and try live requests for public endpoints.
+          </p>
+          <ul class="mt-4 list-disc list-inside text-slate-600 text-sm space-y-1">
+            <li><span class="badge badge-noauth">No Auth</span> endpoints are public.</li>
+            <li><span class="badge badge-auth">Auth Required</span> endpoints require a logged-in session (Cognito SSO).</li>
+            <li>POSTs may require CSRF header <span class="kbd">X-CSRFToken</span> (cookie is set by <code>/health</code>).</li>
+          </ul>
+        </div>
+        <div class="md:w-1/3">
+          <div class="p-4 border border-slate-200 rounded-xl bg-slate-50">
+            <label class="text-sm font-medium">Base URL</label>
+            <input id="baseUrl" class="mt-2 w-full rounded-lg border-slate-300 focus:ring-2 focus:ring-slate-800"
+                   placeholder="https://example.com/api" />
+            <div class="mt-3 flex items-center gap-2">
+              <button id="saveBase" class="px-3 py-1.5 rounded bg-slate-900 text-white hover:bg-black text-sm">Save</button>
+              <button id="detectBase" class="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-100">Auto-detect</button>
+            </div>
+            <div class="mt-4">
+              <button id="pingHealth" class="px-3 py-1.5 rounded bg-emerald-600 text-white text-sm hover:bg-emerald-700">Ping /health</button>
+              <pre id="healthOut" class="mt-2 text-xs bg-white border border-slate-200 rounded p-2 overflow-auto"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Endpoints -->
+    <section id="endpoints" class="space-y-6">
+      <h2 class="text-2xl font-semibold">Endpoints</h2>
+
+      <!-- Helper: endpoint component pattern -->
+      <!-- HEALTH -->
+      <article id="ep-health" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/health/</code>
+          <span class="badge badge-noauth">No Auth</span>
+        </div>
+        <p class="mt-2 text-slate-600">Health check and sets CSRF cookie for same-origin POST testing.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-health">Copy</button>
+            <pre id="curl-health" class="language-bash"><code class="language-bash">curl -sS &quot;${BASE}/health/&quot;</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response</label>
+            <pre class="language-json"><code class="language-json">{
+  "ok": true
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- SSO AUTHORIZE -->
+      <article id="ep-sso-auth" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/auth/sso/authorize?state=...</code>
+          <span class="badge badge-noauth">No Auth</span>
+        </div>
+        <p class="mt-2 text-slate-600">Returns Cognito Hosted UI URL. Frontend should redirect user there.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-sso-auth">Copy</button>
+            <pre id="curl-sso-auth" class="language-bash"><code class="language-bash">curl -sS &quot;${BASE}/auth/sso/authorize?state=xyz123&quot;</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response</label>
+            <pre class="language-json"><code class="language-json">{
+  "authorization_url": "https://your-cognito-domain/oauth2/authorize?...",
+  "state": "xyz123",
+  "provider": "cognito"
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- ME -->
+      <article id="ep-me" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/auth/me</code>
+          <span class="badge badge-auth">Auth Required</span>
+        </div>
+        <p class="mt-2 text-slate-600">Returns the authenticated user's profile.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-me">Copy</button>
+            <pre id="curl-me" class="language-bash"><code class="language-bash">curl -sS -H &quot;Cookie: sessionid=&lt;your-session&gt;&quot; &quot;${BASE}/auth/me&quot;</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response</label>
+            <pre class="language-json"><code class="language-json">{
+  "id": 12,
+  "username": "rohit",
+  "email": "rohit@example.com",
+  "first_name": "",
+  "last_name": "",
+  "profile": {
+    "cognito_sub": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "full_name": "Rohit Singh",
+    "gender": "",
+    "phone_number": "",
+    "address": "",
+    "email_verified": true,
+    "phone_number_verified": false
+  }
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- PACKAGES -->
+      <article id="ep-packages" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/packages</code>
+          <span class="badge badge-noauth">No Auth</span>
+        </div>
+        <p class="mt-2 text-slate-600">List active packages with pricing knobs.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-packages">Copy</button>
+            <pre id="curl-packages" class="language-bash"><code class="language-bash">curl -sS &quot;${BASE}/packages&quot;</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response (truncated)</label>
+            <pre class="language-json"><code class="language-json">[
+  {
+    "id": 1,
+    "name": "tent",
+    "description": "Dome tent",
+    "price_inr": 4999,
+    "active": true,
+    "base_includes": 1,
+    "extra_price_adult_inr": 0,
+    "child_free_max_age": 5,
+    "child_half_max_age": 15,
+    "child_half_multiplier": 0.5
+  }
+]</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- AVAILABILITY -->
+      <article id="ep-availability" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/inventory/availability</code>
+          <span class="badge badge-noauth">No Auth</span>
+        </div>
+        <p class="mt-2 text-slate-600">Event-scoped free capacity for a specific slice (property + unit_type + category).</p>
+        <p class="text-sm text-slate-600">Query: <code>event_id</code>, <code>property_id</code>, <code>unit_type_id</code>, <code>category</code>, optional <code>package_id</code>.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-availability">Copy</button>
+            <pre id="curl-availability" class="language-bash"><code class="language-bash">curl -sS &quot;${BASE}/inventory/availability?event_id=1&amp;property_id=1&amp;unit_type_id=1&amp;category=TENT&quot;</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response</label>
+            <pre class="language-json"><code class="language-json">{
+  "event": { "id": 1, "year": 2025, "...": "..." },
+  "property": { "id": 1, "name": "BANJARA", "...": "..." },
+  "unit_type": { "id": 2, "name": "SWISS TENT", "code": "ST" },
+  "category": "LUXURY",
+  "available_units": 10,
+  "total_capacity": 40
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- PROMOCODE VALIDATE -->
+      <article id="ep-promo" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/promocodes/validate</code>
+          <span class="badge badge-noauth">No Auth</span>
+        </div>
+        <p class="mt-2 text-slate-600">Validate promo code and preview discount against an amount / package / booking.</p>
+        <p class="text-sm text-slate-600">Query: <code>code</code> (required) and one of <code>amount_inr</code>, <code>package_id</code>, or <code>booking_id</code> (+ <code>package_id</code> if needed).</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-promo">Copy</button>
+            <pre id="curl-promo" class="language-bash"><code class="language-bash">curl -sS &quot;${BASE}/promocodes/validate?code=H2H10&amp;amount_inr=5000&quot;</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response</label>
+            <pre class="language-json"><code class="language-json">{
+  "valid": true,
+  "base_inr": 5000,
+  "discount_inr": 500,
+  "final_inr": 4500,
+  "promo": {
+    "code": "H2H10",
+    "kind": "PERCENT",
+    "value": 10,
+    "discount_inr": 500,
+    "final_total_inr": 4500
+  }
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- CREATE BOOKING -->
+      <article id="ep-create-booking" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">POST</span>
+          <code class="text-sm">/bookings/create</code>
+          <span class="badge badge-auth">Auth Required</span>
+        </div>
+        <p class="mt-2 text-slate-600">Create a booking (event-scoped). Optionally attach a promo code; pricing snapshot happens at order creation.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-create-booking">Copy</button>
+            <pre id="curl-create-booking" class="language-bash"><code class="language-bash">curl -sS -X POST &quot;${BASE}/bookings/create&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Cookie: sessionid=&lt;your-session&gt;&quot; \
+  -d '{
+    "event_id": 1,
+    "property_id": 1,
+    "unit_type_id": 2,
+    "category": "LUXURY",
+    "guests": 3,
+    "guest_ages": [28, 12],
+    "extra_adults": 1,
+    "extra_children_half": 1,
+    "extra_children_free": 0,
+    "blood_group": "O+",
+    "emergency_contact_name": "John",
+    "emergency_contact_phone": "9999999999",
+    "package_id": 2,
+    "promo_code": "H2H10"
+  }'</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response (truncated)</label>
+            <pre class="language-json"><code class="language-json">{
+  "id": 123,
+  "status": "PENDING_PAYMENT",
+  "order": null,
+  "event": { "...": "..." },
+  "property": { "...": "..." },
+  "unit_type": { "...": "..." },
+  "category": "LUXURY",
+  "guests": 3,
+  "pricing_total_inr": null,
+  "promo_code": { "code": "H2H10", "kind": "PERCENT", "value": 10, "...": "..." },
+  "created_at": "2025-10-18T13:32:11Z"
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- CREATE ORDER (applies promo, returns payment link) -->
+      <article id="ep-create-order" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">POST</span>
+          <code class="text-sm">/payments/create-order</code>
+          <span class="badge badge-auth">Auth Required</span>
+        </div>
+        <p class="mt-2 text-slate-600">Computes price (incl. extras), applies promo, creates Razorpay order + optional Payment Link.</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-create-order">Copy</button>
+            <pre id="curl-create-order" class="language-bash"><code class="language-bash">curl -sS -X POST &quot;${BASE}/payments/create-order&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Cookie: sessionid=&lt;your-session&gt;&quot; \
+  -d '{
+    "package_id": 2,
+    "booking_id": 123,
+    "promo_code": "H2H10"
+  }'</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response (truncated)</label>
+            <pre class="language-json"><code class="language-json">{
+  "order": { "id": "order_ABC123", "amount": 450000, "currency": "INR", "...": "..." },
+  "key_id": "&lt;RAZORPAY_KEY_ID&gt;",
+  "order_db": { "id": 77, "razorpay_order_id": "order_ABC123", "paid": false, "...": "..." },
+  "payment_link": "https://rzp.io/i/xyz",
+  "payment_link_meta": { "payment_link_id": "plink_123" },
+  "pricing_snapshot": {
+    "base": { "includes": 1, "price_inr": 4999 },
+    "extra_unit_prices": { "...": "..." },
+    "extra_counts": { "...": "..." },
+    "extras_amount_inr": 1000,
+    "promo": { "code": "H2H10", "discount_inr": 500, "final_total_inr": 4500 },
+    "total_inr": 4500
+  }
+}</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- WEBHOOK (Razorpay -> Server) -->
+      <article id="ep-webhook" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">POST</span>
+          <code class="text-sm">/payments/webhook</code>
+          <span class="badge badge-noauth">No Auth</span>
+        </div>
+        <p class="mt-2 text-slate-600">Razorpay webhook receiver (verifies signature, marks orders paid, allocates units).</p>
+        <p class="text-sm text-slate-600">Header: <code>X-Razorpay-Signature</code> (HMAC SHA256 of raw body with secret).</p>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-webhook">Copy</button>
+            <pre id="curl-webhook" class="language-bash"><code class="language-bash">curl -sS -X POST &quot;${BASE}/payments/webhook&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;X-Razorpay-Signature: &lt;hmac-sha256&gt;&quot; \
+  -d '{ &quot;event&quot;: &quot;payment_link.paid&quot;, &quot;payload&quot;: { &quot;payment_link&quot;: { &quot;entity&quot;: { &quot;reference_id&quot;: &quot;orderdb-77&quot; }}, &quot;payment&quot;: { &quot;entity&quot;: { &quot;id&quot;: &quot;pay_123&quot;, &quot;order_id&quot;: &quot;order_ABC123&quot; }}} }'</code></pre>
+          </div>
+          <div>
+            <label class="text-sm font-medium">Response</label>
+            <pre class="language-json"><code class="language-json">ok</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <!-- TICKET PDF -->
+      <article id="ep-ticket" class="endpoint card p-6">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-method">GET</span>
+          <code class="text-sm">/tickets/&lt;razorpay_order_id&gt;.pdf</code>
+          <span class="badge badge-auth">Auth Typically Required</span>
+        </div>
+        <p class="mt-2 text-slate-600">Downloads combined Invoice + Pass PDF for a <em>paid</em> order belonging to the user.</p>
+        <div class="mt-4 grid md:grid-cols-2 gap-4">
+          <div class="relative">
+            <button class="copy-btn" data-copy="#curl-ticket">Copy</button>
+            <pre id="curl-ticket" class="language-bash"><code class="language-bash">curl -L &quot;${BASE}/tickets/order_ABC123.pdf&quot; -o H2H_order_ABC123.pdf</code></pre>
+          </div>
+          <div>
+            <p class="text-sm text-slate-600">Content-Type: <code>application/pdf</code></p>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- Quick Examples -->
+    <section id="examples" class="card p-6">
+      <h2 class="text-2xl font-semibold">Quick Examples</h2>
+      <div class="mt-4 grid md:grid-cols-2 gap-6">
+        <div class="relative">
+          <div class="absolute right-2 top-2 text-xs text-slate-400">curl</div>
+          <pre class="language-bash"><code class="language-bash"># 1) Health &amp; CSRF
+BASE=&quot;https://your-host/api&quot;
+curl -sS &quot;$BASE/health/&quot;
+
+# 2) Packages
+curl -sS &quot;$BASE/packages&quot;
+
+# 3) Availability
+curl -sS &quot;$BASE/inventory/availability?event_id=1&amp;property_id=1&amp;unit_type_id=1&amp;category=NORMAL&quot;</code></pre>
+        </div>
+        <div>
+          <pre class="language-json"><code class="language-json">{
+  "workflow": [
+    "GET /auth/sso/authorize -> redirect user to Cognito",
+    "GET /auth/sso/callback -> sets session",
+    "POST /bookings/create (attach promo_code if any)",
+    "POST /payments/create-order (applies promo, returns payment link)",
+    "User pays -> Razorpay webhook marks order paid",
+    "Server allocates units -> Booking status CONFIRMED",
+    "GET /tickets/&lt;order_id&gt;.pdf"
+  ]
+}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <footer class="py-8 text-center text-sm text-slate-500">
+      © <span id="yr"></span> Highway to Heal · REST API
+    </footer>
+  </main>
+
+  <script>
+    // base URL helpers
+    const baseInp = document.getElementById('baseUrl');
+    const saveBaseBtn = document.getElementById('saveBase');
+    const detectBtn = document.getElementById('detectBase');
+    const healthBtn = document.getElementById('pingHealth');
+    const out = document.getElementById('healthOut');
+
+    function getBase() {
+      const s = localStorage.getItem('h2h_api_base');
+      return s || (window.DEFAULT_BASE || (location.origin + (location.pathname.endsWith('/') ? '' : '/') ));
+    }
+    function setBase(v) { localStorage.setItem('h2h_api_base', v); }
+    function fillBase() { baseInp.value = getBase(); }
+    function replaceBASEInCode() {
+      const BASE = getBase();
+      document.querySelectorAll('pre[id^="curl-"]').forEach(pre => {
+        pre.innerHTML = pre.innerHTML.replace(/\$\{BASE\}/g, BASE);
+        Prism.highlightElement(pre.querySelector('code'));
+      });
+    }
+    function getCookie(name) {
+      const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+      return m ? m.pop() : '';
+    }
+
+    saveBaseBtn.addEventListener('click', () => {
+      const v = baseInp.value.trim().replace(/\/$/, '') + '/';
+      setBase(v);
+      replaceBASEInCode();
+    });
+    detectBtn.addEventListener('click', () => {
+      const guess = location.origin + (location.pathname.endsWith('/') ? '' : '/') ;
+      baseInp.value = guess;
+      setBase(guess);
+      replaceBASEInCode();
+    });
+    healthBtn.addEventListener('click', async () => {
+      out.textContent = 'Requesting...';
+      try {
+        const res = await fetch(getBase() + 'health/', { credentials: 'include' });
+        const txt = await res.text();
+        try {
+          out.textContent = JSON.stringify(JSON.parse(txt), null, 2);
+        } catch { out.textContent = txt; }
+      } catch (e) {
+        out.textContent = String(e);
+      }
+    });
+
+    // Copy buttons
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.copy-btn');
+      if (!btn) return;
+      const sel = btn.getAttribute('data-copy');
+      const pre = document.querySelector(sel);
+      if (!pre) return;
+      const raw = pre.innerText.replace(/\$\{BASE\}/g, getBase());
+      try {
+        await navigator.clipboard.writeText(raw);
+        btn.textContent = 'Copied!';
+        setTimeout(() => (btn.textContent = 'Copy'), 1200);
+      } catch {}
+    });
+
+    // init
+    window.DEFAULT_BASE = "{{ default_base|default:'' }}";
+    fillBase();
+    replaceBASEInCode();
+    document.getElementById('yr').textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>
