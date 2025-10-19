@@ -134,25 +134,6 @@ class EventSerializer(serializers.ModelSerializer):
 
 # --- Booking ---
 
-# class BookingSerializer(serializers.ModelSerializer):
-#     property = PropertySerializer(read_only=True)
-#     unit_type = UnitTypeSerializer(read_only=True)
-#     event = EventSerializer(read_only=True)
-
-#     class Meta:
-#         model = Booking
-#         fields = [
-#             "id", "order", "user", "event", "property", "unit_type", "category",
-#             "check_in", "check_out", "guests",
-#             # safety info
-#             "blood_group", "emergency_contact_name", "emergency_contact_phone",
-#             # guest/pricing info
-#             "guest_ages", "extra_adults", "extra_children_half", "extra_children_free",
-#             "pricing_total_inr", "pricing_breakdown",
-#             "status", "created_at",
-#         ]
-#         read_only_fields = ["status", "created_at", "pricing_total_inr", "pricing_breakdown"]
-
 
 class PromoCodeSerializer(serializers.ModelSerializer):  # ADD
     class Meta:

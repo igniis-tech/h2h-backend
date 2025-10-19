@@ -117,31 +117,6 @@ class PromoCodeAdmin(admin.ModelAdmin):
         # keep fully editable; adjust if you want code immutable after creation
         return ()
     
-    
-
-# @admin.register(Booking)
-# class BookingAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "id", "user", "event", "property", "unit_type", "category",
-#         "guests", "extra_adults", "extra_children_half", "extra_children_free",
-#         "pricing_total_inr", "status", "created_at",
-#     )
-#     list_filter = ("event", "property", "unit_type", "category", "status")
-#     search_fields = ("id", "user__username", "user__email")
-#     readonly_fields = ("pricing_total_inr", "pricing_breakdown")
-#     fieldsets = (
-#         ("Core", {"fields": ("user", "event", "order", "status")}),
-#         ("Inventory Slice", {"fields": ("property", "unit_type", "category")}),
-#         ("Dates", {"fields": ("check_in", "check_out")}),
-#         ("Guests", {
-#             "fields": (
-#                 "guests", "guest_ages",
-#                 "extra_adults", "extra_children_half", "extra_children_free",
-#             )
-#         }),
-#         ("Safety", {"fields": ("blood_group", "emergency_contact_name", "emergency_contact_phone")}),
-#         ("Pricing Snapshot", {"fields": ("pricing_total_inr", "pricing_breakdown")}),
-#     )
 
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):

@@ -7,6 +7,7 @@ from datetime import date
 
 from django.conf import settings
 from django.http import JsonResponse, HttpResponse
+from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.contrib.auth import login
 from django.db import transaction
@@ -20,13 +21,11 @@ from .models import (
     Package,
     Order,
     WebhookEvent,
-    # inventory models
     Property,
     UnitType,
     Unit,
     Booking,
     Allocation,
-    # events
     Event,
     EventDay,
     PromoCode, 
@@ -50,6 +49,22 @@ from .auth_utils import (
     get_or_create_user_from_userinfo,
 )
 from .pdf import build_invoice_and_pass_pdf_from_order
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@ensure_csrf_cookie
+def api_docs(request):
+    """
+    Renders the interactive API documentation (index.html).
+    Also sets a CSRF cookie so same-origin POST tests can work if you add them later.
+    """
+    # If your app is mounted at /api/, this makes the default BASE = /api/
+    # If mounted at root, change to "/" or leave blank.
+    default_base = request.build_absolute_uri(request.path)
+    # Ensure trailing slash for ${BASE}
+    if not default_base.endswith("/"):
+        default_base += "/"
+    return render(request, "index.html", {"default_base": default_base})
 
 
 # -----------------------------------
@@ -490,102 +505,6 @@ def availability(request):
         "available_units": count,
         "total_capacity": total_cap
     })
-
-
-# @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
-# def create_booking(request):
-#     """
-#     Creates a booking BEFORE payment (no date selection; dates come from event).
-
-#     Body:
-#     {
-#       "event_id": 1,
-#       "property_id": 1,
-#       "unit_type_id": 2,
-#       "category": "NORMAL",
-#       "guests": 2,                          # total including primary
-#       "blood_group": "O+",
-#       "emergency_contact_name": "John",
-#       "emergency_contact_phone": "+91...",
-#       # Either provide ages for the EXTRA guests (beyond package.base_includes),
-#       "guest_ages": [7, 17],
-#       # or provide explicit counts (server rules still apply if ages are present):
-#       "extra_adults": 1,
-#       "extra_children_half": 0,
-#       "extra_children_free": 1,
-#       "package_id": 3,   # required if order_id not provided
-#       "order_id": 123    # optional; if present, package is derived from the order
-#     }
-#     """
-#     data = request.data
-#     try:
-#         event = Event.objects.get(id=data.get("event_id"), active=True, booking_open=True)
-#         prop = Property.objects.get(id=data.get("property_id"))
-#         utype = UnitType.objects.get(id=data.get("unit_type_id"))
-#     except Exception:
-#         return Response({"error": "invalid event/property/unit_type"}, status=400)
-
-#     category = (data.get("category") or "").strip().upper()
-#     guests_total = int(data.get("guests") or 1)
-#     blood_group = (data.get("blood_group") or "").strip()[:5]
-#     emer_name = (data.get("emergency_contact_name") or "").strip()[:120]
-#     emer_phone = (data.get("emergency_contact_phone") or "").strip()[:32]
-
-#     # Determine package from order or explicit package_id
-#     package = None
-#     order = None
-#     if data.get("order_id"):
-#         try:
-#             order = Order.objects.get(id=data["order_id"], user=request.user)
-#             package = order.package
-#         except Order.DoesNotExist:
-#             return Response({"error": "invalid order_id"}, status=400)
-#     else:
-#         if not data.get("package_id"):
-#             return Response({"error": "package_id required when order_id is not provided"}, status=400)
-#         try:
-#             package = Package.objects.get(id=data["package_id"], active=True)
-#         except Package.DoesNotExist:
-#             return Response({"error": "invalid package_id"}, status=400)
-
-#     # Validate package <-> unit_type mapping
-#     try:
-#         _validate_package_vs_unit_type(package, utype)
-#     except ValueError as ve:
-#         return Response({"error": str(ve)}, status=400)
-
-#     # Extract extra guest info
-#     guest_ages = data.get("guest_ages") or []
-#     extra_adults = int(data.get("extra_adults") or 0)
-#     extra_half = int(data.get("extra_children_half") or 0)
-#     extra_free = int(data.get("extra_children_free") or 0)
-
-#     # Create booking
-#     booking = Booking.objects.create(
-#         user=request.user,
-#         event=event,
-#         property=prop,
-#         unit_type=utype,
-#         category=category,
-#         guests=max(1, guests_total),
-#         status="PENDING_PAYMENT",
-#         order=order if order else None,
-#         # mirror dates from event for compatibility with existing code/export
-#         check_in=event.start_date,
-#         check_out=event.end_date,
-#         # safety
-#         blood_group=blood_group,
-#         emergency_contact_name=emer_name,
-#         emergency_contact_phone=emer_phone,
-#         # guests/pricing inputs
-#         guest_ages=guest_ages if isinstance(guest_ages, list) else [],
-#         extra_adults=max(0, extra_adults),
-#         extra_children_half=max(0, extra_half),
-#         extra_children_free=max(0, extra_free),
-#     )
-
-#     return Response(BookingSerializer(booking).data, status=201)
 
 
 def _get_live_promocode(code: str) -> PromoCode | None:
