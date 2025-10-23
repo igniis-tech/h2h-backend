@@ -11,7 +11,7 @@ load_dotenv(BASE_DIR / ".env")
 
 # ---- Core ----
 SECRET_KEY = 'django-insecure-#o*1r_%m6d$ofi^h%*r-_lmt6hi2(rucujd9=)d-g*sfnu@kpy'
-DEBUG = False
+DEBUG = True
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 ALLOWED_HOSTS = [
@@ -20,11 +20,34 @@ ALLOWED_HOSTS = [
     ".vercel.app",
     "h2h-backend-vpk9.vercel.app",  # your deployment
 ]
-
+CORS_ALLOW_CREDENTIALS = True
 # If you POST from the Vercel domain, add it to CSRF trusted origins
 CSRF_TRUSTED_ORIGINS = [
     "https://h2h-backend-vpk9.vercel.app",
+    "http://127.0.0.1:5173/"
+
 ]
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-language",
+    "content-type",
+    "x-csrftoken",
+    "x-requested-with",
+    "authorization",
+]
+
+# ----- CSRF -----
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",      # ✅ no trailing slash
+    "http://127.0.0.1:5173",      # ✅ add localhost & 127.0.0.1
+    # "https://your-frontend.vercel.app",  # add your deployed UI origin here
+]
+
+# Keep cookies usable in local HTTP
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
 
 # ---- Apps ----
 INSTALLED_APPS = [

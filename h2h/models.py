@@ -27,6 +27,29 @@ class UserProfile(models.Model):
         return f"{self.user.username} ({self.cognito_sub})"
 
 
+# class Package(models.Model):
+#     """
+#     Base package covers 'base_includes' people (default 1).
+#     Extra guests are charged using the fields below, with child bands configurable.
+#     """
+#     name = models.CharField(max_length=100)
+#     description = models.TextField(blank=True)
+#     price_inr = models.IntegerField()
+#     active = models.BooleanField(default=True)
+
+#     # ---- pricing controls editable from Admin ----
+#     base_includes = models.PositiveSmallIntegerField(default=1, help_text="People included in base price")
+#     extra_price_adult_inr = models.IntegerField(
+#         default=0,
+#         help_text="Extra price per additional ADULT. If 0, base price is used as extra adult price."
+#     )
+#     child_free_max_age = models.PositiveSmallIntegerField(default=5, help_text="Age <= this is free")
+#     child_half_max_age = models.PositiveSmallIntegerField(default=15, help_text="Age <= this is half (and > free)")
+#     child_half_multiplier = models.FloatField(default=0.5, help_text="Half-price multiplier (typically 0.5)")
+
+#     def __str__(self):
+#         return f"{self.name} - ₹{self.price_inr}"
+
 class Package(models.Model):
     """
     Base package covers 'base_includes' people (default 1).
@@ -36,6 +59,14 @@ class Package(models.Model):
     description = models.TextField(blank=True)
     price_inr = models.IntegerField()
     active = models.BooleanField(default=True)
+
+    # NEW: attach multiple unit types (optional; if empty, your fallback map is used)
+    allowed_unit_types = models.ManyToManyField(
+        "UnitType",
+        blank=True,
+        related_name="packages",
+        help_text="If empty, fallback PACKAGE_UNITTYPE_MAP is used."
+    )
 
     # ---- pricing controls editable from Admin ----
     base_includes = models.PositiveSmallIntegerField(default=1, help_text="People included in base price")
@@ -49,6 +80,7 @@ class Package(models.Model):
 
     def __str__(self):
         return f"{self.name} - ₹{self.price_inr}"
+
 
 
 class Order(models.Model):
@@ -245,6 +277,68 @@ class PromoCode(models.Model):  # ADD
             raise ValidationError("Percent value cannot exceed 100.")
         
         
+# class Booking(models.Model):
+#     """
+#     One booking per order (create before payment; dates come from Event).
+#     """
+#     STATUS = (
+#         ("PENDING_PAYMENT", "Pending Payment"),
+#         ("CONFIRMED", "Confirmed"),
+#         ("CANCELLED", "Cancelled"),
+#     )
+#     promo_code = models.ForeignKey("PromoCode", null=True, blank=True,
+#                                    on_delete=models.SET_NULL, related_name="bookings")
+#     promo_discount_inr = models.IntegerField(null=True, blank=True)
+#     promo_breakdown = models.JSONField(null=True, blank=True)
+    
+#     order = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="booking", null=True, blank=True)
+
+#     # who & what
+#     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
+#     event = models.ForeignKey(Event, on_delete=models.PROTECT, related_name="bookings", null=True, blank=True)
+
+#     # inventory slice
+#     property = models.ForeignKey("Property", on_delete=models.PROTECT, related_name="bookings")
+#     unit_type = models.ForeignKey("UnitType", on_delete=models.PROTECT, related_name="bookings")
+#     category = models.CharField(max_length=60, blank=True, default="")  # align with Unit.category
+
+#     # dates for compatibility (auto-filled from event)
+#     check_in = models.DateField(null=True, blank=True)
+#     check_out = models.DateField(null=True, blank=True)
+
+#     # guests
+#     guests = models.PositiveSmallIntegerField(default=1, help_text="Total people including the primary person")
+#     # optional guest details for pricing (all extras beyond base_includes)
+#     guest_ages = models.JSONField(null=True, blank=True, help_text="List of ages for EXTRA guests only")
+#     extra_adults = models.PositiveSmallIntegerField(default=0)
+#     extra_children_half = models.PositiveSmallIntegerField(default=0)
+#     extra_children_free = models.PositiveSmallIntegerField(default=0)
+
+#     # health/safety
+#     blood_group = models.CharField(max_length=5, blank=True, default="")
+#     emergency_contact_name = models.CharField(max_length=120, blank=True, default="")
+#     emergency_contact_phone = models.CharField(max_length=32, blank=True, default="")
+
+#     # pricing snapshot
+#     pricing_total_inr = models.IntegerField(null=True, blank=True)
+#     pricing_breakdown = models.JSONField(null=True, blank=True)
+
+#     status = models.CharField(max_length=20, choices=STATUS, default="PENDING_PAYMENT")
+#     created_at = models.DateTimeField(auto_now_add=True)
+
+#     def __str__(self):
+#         return f"Booking #{self.id} (Event={self.event and self.event.year} {self.property.name} {self.unit_type.name} {self.category})"
+
+#     @builtins.property
+#     def nights(self) -> int:
+#         # If event is linked, compute from event window; fallback to explicit dates
+#         if self.event and isinstance(self.event.start_date, date) and isinstance(self.event.end_date, date):
+#             return max(1, (self.event.end_date - self.event.start_date).days)
+#         if isinstance(self.check_in, date) and isinstance(self.check_out, date):
+#             return max(1, (self.check_out - self.check_in).days)
+#         return 1
+
+
 class Booking(models.Model):
     """
     One booking per order (create before payment; dates come from Event).
@@ -254,20 +348,26 @@ class Booking(models.Model):
         ("CONFIRMED", "Confirmed"),
         ("CANCELLED", "Cancelled"),
     )
+
     promo_code = models.ForeignKey("PromoCode", null=True, blank=True,
                                    on_delete=models.SET_NULL, related_name="bookings")
     promo_discount_inr = models.IntegerField(null=True, blank=True)
     promo_breakdown = models.JSONField(null=True, blank=True)
-    
+
     order = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="booking", null=True, blank=True)
 
     # who & what
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
-    event = models.ForeignKey(Event, on_delete=models.PROTECT, related_name="bookings", null=True, blank=True)
+    event = models.ForeignKey("Event", on_delete=models.PROTECT, related_name="bookings", null=True, blank=True)
 
     # inventory slice
-    property = models.ForeignKey("Property", on_delete=models.PROTECT, related_name="bookings")
-    unit_type = models.ForeignKey("UnitType", on_delete=models.PROTECT, related_name="bookings")
+    # property = models.ForeignKey("Property", on_delete=models.PROTECT, related_name="bookings")
+    # unit_type = models.ForeignKey("UnitType", on_delete=models.PROTECT, related_name="bookings")
+    property = models.ForeignKey("Property", on_delete=models.PROTECT, related_name="bookings",
+                             null=True, blank=True)
+    unit_type = models.ForeignKey("UnitType", on_delete=models.PROTECT, related_name="bookings",
+                              null=True, blank=True)
+
     category = models.CharField(max_length=60, blank=True, default="")  # align with Unit.category
 
     # dates for compatibility (auto-filled from event)
@@ -276,13 +376,18 @@ class Booking(models.Model):
 
     # guests
     guests = models.PositiveSmallIntegerField(default=1, help_text="Total people including the primary person")
+
+    # NEW: full companion list (excluding the primary person)
+    # shape: [{"name":"...","age":12,"blood_group":"A+"}, ...]
+    companions = models.JSONField(null=True, blank=True, help_text="List of co-travellers excluding primary user")
+
     # optional guest details for pricing (all extras beyond base_includes)
     guest_ages = models.JSONField(null=True, blank=True, help_text="List of ages for EXTRA guests only")
     extra_adults = models.PositiveSmallIntegerField(default=0)
     extra_children_half = models.PositiveSmallIntegerField(default=0)
     extra_children_free = models.PositiveSmallIntegerField(default=0)
 
-    # health/safety
+    # health/safety of primary
     blood_group = models.CharField(max_length=5, blank=True, default="")
     emergency_contact_name = models.CharField(max_length=120, blank=True, default="")
     emergency_contact_phone = models.CharField(max_length=32, blank=True, default="")
@@ -293,19 +398,23 @@ class Booking(models.Model):
 
     status = models.CharField(max_length=20, choices=STATUS, default="PENDING_PAYMENT")
     created_at = models.DateTimeField(auto_now_add=True)
-
+    
     def __str__(self):
-        return f"Booking #{self.id} (Event={self.event and self.event.year} {self.property.name} {self.unit_type.name} {self.category})"
+        p = getattr(self.property, "name", "-")
+        ut = getattr(self.unit_type, "name", "-")
+        ev = self.event.year if self.event else "-"
+        return f"Booking #{self.id} (Event={ev} {p} {ut} {self.category})"
+
+    # def __str__(self):
+    #     return f"Booking #{self.id} (Event={self.event and self.event.year} {self.property.name} {self.unit_type.name} {self.category})"
 
     @builtins.property
     def nights(self) -> int:
-        # If event is linked, compute from event window; fallback to explicit dates
         if self.event and isinstance(self.event.start_date, date) and isinstance(self.event.end_date, date):
             return max(1, (self.event.end_date - self.event.start_date).days)
         if isinstance(self.check_in, date) and isinstance(self.check_out, date):
             return max(1, (self.check_out - self.check_in).days)
         return 1
-
 
 class Allocation(models.Model):
     """
