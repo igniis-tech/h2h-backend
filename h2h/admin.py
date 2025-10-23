@@ -18,6 +18,7 @@ from .models import (
     PromoCode,
 )
 
+
 admin.site.site_header = "H2H Admin Panel"
 admin.site.site_title = "H2H Admin"
 admin.site.index_title = "Welcome to H2H Admin"
@@ -35,8 +36,32 @@ class UserProfileAdmin(admin.ModelAdmin):
     search_fields = ("user__username", "user__email", "cognito_sub", "full_name", "phone_number")
 
 
+# @admin.register(Package)
+# class PackageAdmin(admin.ModelAdmin):
+#     list_display = (
+#         "name", "price_inr", "active",
+#         "base_includes", "extra_price_adult_inr",
+#         "child_free_max_age", "child_half_max_age", "child_half_multiplier",
+#     )
+#     list_filter = ("active",)
+#     search_fields = ("name",)
+#     fieldsets = (
+#         (None, {"fields": ("name", "description", "active")}),
+#         ("Pricing", {
+#             "fields": (
+#                 "price_inr", "base_includes", "extra_price_adult_inr",
+#                 "child_free_max_age", "child_half_max_age", "child_half_multiplier"
+#             ),
+#             "description": (
+#                 "Base price includes 'base_includes' people. "
+#                 "Extra adult: 'extra_price_adult_inr' (or base if 0). "
+#                 "Child ≤ free_max -> free; ≤ half_max -> half multiplier."
+#             ),
+#         }),
+#     )
+
 @admin.register(Package)
-class PackageAdmin(admin.ModelAdmin):
+class PackageAdmin(admin.ModelAdmin):   # ← not models.ModelAdmin
     list_display = (
         "name", "price_inr", "active",
         "base_includes", "extra_price_adult_inr",
@@ -44,20 +69,26 @@ class PackageAdmin(admin.ModelAdmin):
     )
     list_filter = ("active",)
     search_fields = ("name",)
+
+    # leave this ONLY if your Package model actually has this M2M field
+    filter_horizontal = ("allowed_unit_types",)
+
     fieldsets = (
         (None, {"fields": ("name", "description", "active")}),
+        ("Unit selection", {
+            "fields": ("allowed_unit_types",),   # needs M2M to exist
+            "description": "Choose one or more unit types for this package. "
+                           "If empty, the fallback map is used."
+        }),
         ("Pricing", {
             "fields": (
                 "price_inr", "base_includes", "extra_price_adult_inr",
                 "child_free_max_age", "child_half_max_age", "child_half_multiplier"
             ),
-            "description": (
-                "Base price includes 'base_includes' people. "
-                "Extra adult: 'extra_price_adult_inr' (or base if 0). "
-                "Child ≤ free_max -> free; ≤ half_max -> half multiplier."
-            ),
         }),
     )
+
+
 
 
 @admin.register(Order)

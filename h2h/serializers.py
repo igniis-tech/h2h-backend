@@ -33,15 +33,35 @@ class UserSerializer(serializers.ModelSerializer):
 
 # --- Catalog / Pricing ---
 
+# class PackageSerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = Package
+#         fields = [
+#             "id", "name", "description", "price_inr", "active",
+#             # pricing knobs (single-person base + extras)
+#             "base_includes", "extra_price_adult_inr",
+#             "child_free_max_age", "child_half_max_age", "child_half_multiplier",
+#         ]
+
+class UnitTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UnitType
+        fields = ["id", "name", "code"]
+        
+        
 class PackageSerializer(serializers.ModelSerializer):
+    # show the linked unit types
+    allowed_unit_types = UnitTypeSerializer(many=True, read_only=True)
+
     class Meta:
         model = Package
         fields = [
             "id", "name", "description", "price_inr", "active",
-            # pricing knobs (single-person base + extras)
+            "allowed_unit_types",                    # NEW
             "base_includes", "extra_price_adult_inr",
             "child_free_max_age", "child_half_max_age", "child_half_multiplier",
         ]
+
 
 # --- Orders ---
 
@@ -140,22 +160,46 @@ class PromoCodeSerializer(serializers.ModelSerializer):  # ADD
         model = PromoCode
         fields = ["code", "kind", "value", "is_active", "start_date", "end_date", "description"]
 
+# class BookingSerializer(serializers.ModelSerializer):
+#     property = PropertySerializer(read_only=True)
+#     unit_type = UnitTypeSerializer(read_only=True)
+#     event = EventSerializer(read_only=True)
+#     promo_code = PromoCodeSerializer(read_only=True)  # ADD
+
+#     class Meta:
+#         model = Booking
+#         fields = [
+#             "id", "order", "user", "event", "property", "unit_type", "category",
+#             "check_in", "check_out", "guests",
+#             "blood_group", "emergency_contact_name", "emergency_contact_phone",
+#             "guest_ages", "extra_adults", "extra_children_half", "extra_children_free",
+#             "pricing_total_inr", "pricing_breakdown",
+#             "promo_code", "promo_discount_inr", "promo_breakdown"
+#             "status", "created_at",
+#         ]
+#         read_only_fields = ["status", "created_at", "pricing_total_inr", "pricing_breakdown",
+#                             "promo_code", "promo_discount_inr", "promo_breakdown"]
+
 class BookingSerializer(serializers.ModelSerializer):
     property = PropertySerializer(read_only=True)
     unit_type = UnitTypeSerializer(read_only=True)
     event = EventSerializer(read_only=True)
-    promo_code = PromoCodeSerializer(read_only=True)  # ADD
+    promo_code = PromoCodeSerializer(read_only=True)
+    order = OrderSerializer(read_only=True)  # show nested order summary to "attach every order with user"
 
     class Meta:
         model = Booking
         fields = [
             "id", "order", "user", "event", "property", "unit_type", "category",
             "check_in", "check_out", "guests",
+            "companions",  # NEW
             "blood_group", "emergency_contact_name", "emergency_contact_phone",
             "guest_ages", "extra_adults", "extra_children_half", "extra_children_free",
             "pricing_total_inr", "pricing_breakdown",
-            "promo_code", "promo_discount_inr", "promo_breakdown"
+            "promo_code", "promo_discount_inr", "promo_breakdown",  # ← FIX: add comma here
             "status", "created_at",
         ]
-        read_only_fields = ["status", "created_at", "pricing_total_inr", "pricing_breakdown",
-                            "promo_code", "promo_discount_inr", "promo_breakdown"]
+        read_only_fields = [
+            "status", "created_at", "pricing_total_inr", "pricing_breakdown",
+            "promo_code", "promo_discount_inr", "promo_breakdown"
+        ]
