@@ -38,9 +38,9 @@ CORS_ALLOW_HEADERS = [
 
 # ----- CSRF -----
 CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:5173",      # ✅ no trailing slash
-    "http://127.0.0.1:5173",      # ✅ add localhost & 127.0.0.1
-    # "https://your-frontend.vercel.app",  # add your deployed UI origin here
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://h2h-backend-vpk9.vercel.app",
 ]
 
 # Keep cookies usable in local HTTP
