@@ -33,16 +33,6 @@ class UserSerializer(serializers.ModelSerializer):
 
 # --- Catalog / Pricing ---
 
-# class PackageSerializer(serializers.ModelSerializer):
-#     class Meta:
-#         model = Package
-#         fields = [
-#             "id", "name", "description", "price_inr", "active",
-#             # pricing knobs (single-person base + extras)
-#             "base_includes", "extra_price_adult_inr",
-#             "child_free_max_age", "child_half_max_age", "child_half_multiplier",
-#         ]
-
 class UnitTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = UnitType
@@ -57,7 +47,7 @@ class PackageSerializer(serializers.ModelSerializer):
         model = Package
         fields = [
             "id", "name", "description", "price_inr", "active",
-            "allowed_unit_types",                    # NEW
+            "allowed_unit_types",
             "base_includes", "extra_price_adult_inr",
             "child_free_max_age", "child_half_max_age", "child_half_multiplier",
         ]

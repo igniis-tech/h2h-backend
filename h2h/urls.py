@@ -15,4 +15,7 @@ urlpatterns = [
     path("bookings/create", views.create_booking, name="create_booking"),
     path("bookings/me", views.my_bookings, name="my_bookings"),
     path("promocodes/validate", views.validate_promocode, name="validate_promocode"),
+    path("tickets/order/<int:order_id>.pdf", views.ticket_pdf_by_order_id, name="ticket_pdf_by_order_id"),
+    path("tickets/booking/<int:booking_id>.pdf", views.ticket_pdf_by_booking_id, name="ticket_pdf_by_booking_id"),
+    path("auth/logout", views.logout_view, name="logout"),
 ]
