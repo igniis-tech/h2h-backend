@@ -531,6 +531,8 @@ def _compute_booking_pricing(package: Package, booking: Booking):
 # -----------------------------------
 # Payments
 # -----------------------------------
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_order(request):
@@ -1175,14 +1177,13 @@ def _extras_from_people(package: Package, total_people: int, ages_for_everyone: 
 
 
 def _dbg(msg, **kw):
-    """Debug helper: log + print with small JSON payloads."""
+    """Compact JSON log; avoid duplicate console prints."""
     try:
         payload = json.dumps(kw, default=str)[:4000]
     except Exception:
         payload = str(kw)
     logger.warning("[create_booking] %s | %s", msg, payload)
-    # Also print so it shows up locally even if logging not configured
-    print(f"[create_booking] {msg} | {payload}")
+
 
 
 @api_view(["POST"])
@@ -1331,6 +1332,282 @@ def create_booking(request):
 
 
 
+# @api_view(["POST"])
+# @permission_classes([IsAuthenticated])
+# def create_order(request):
+#     """
+#     Body:
+#     {
+#       "package_id": 1,
+#       "booking_id": 123,
+#       "promo_code": "H2H10",
+#       "debug": true
+#     }
+
+#     Capacity precheck ignores Booking.category. Only unit_type (from Package) matters.
+#     """
+#     debug_mode = str(request.data.get("debug") or "").lower() in ("1", "true", "yes", "y")
+#     package_id = request.data.get("package_id")
+#     booking_id = request.data.get("booking_id")
+#     req_promo_code = (request.data.get("promo_code") or "").strip() or None
+
+#     _dbg("CREATE_ORDER:ENTRY",
+#          path=getattr(request, "get_full_path", lambda: "")(),
+#          user_id=getattr(request.user, "id", None),
+#          package_id=package_id,
+#          booking_id=booking_id,
+#          req_promo_code=req_promo_code,
+#          debug_mode=debug_mode)
+
+#     if not package_id:
+#         _dbg("CREATE_ORDER:ERR_NO_PACKAGE_ID")
+#         return Response({"error": "package_id required"}, status=400)
+
+#     try:
+#         package = Package.objects.get(id=package_id, active=True)
+#         _dbg("CREATE_ORDER:PACKAGE_OK", package_id=package.id, package_name=package.name)
+#     except Package.DoesNotExist:
+#         _dbg("CREATE_ORDER:ERR_BAD_PACKAGE", package_id=package_id)
+#         return Response({"error": "invalid package"}, status=404)
+
+#     total_inr = int(package.price_inr)
+#     booking = None
+#     breakdown = None
+#     guests_total = None
+
+#     if booking_id:
+#         try:
+#             booking = Booking.objects.get(id=booking_id, user=request.user)
+#             _dbg("CREATE_ORDER:BOOKING_OK",
+#                  booking_id=booking.id,
+#                  event_id=booking.event_id,
+#                  guests=booking.guests,
+#                  category=(booking.category or "").strip().upper())
+#         except Booking.DoesNotExist:
+#             _dbg("CREATE_ORDER:ERR_BAD_BOOKING", booking_id=booking_id)
+#             return Response({"error": "invalid booking_id"}, status=400)
+
+#         try:
+#             total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
+#             _dbg("CREATE_ORDER:PRICING_OK",
+#                  total_inr=total_inr,
+#                  guests_total=guests_total,
+#                  computed_from=(breakdown or {}).get("computed_from"))
+#         except Exception as ex:
+#             _dbg("CREATE_ORDER:PRICING_ERR", err=str(ex))
+#             return Response({"error": "pricing_failed", "detail": str(ex)}, status=400)
+
+#     # ---- capacity precheck (ignore category) ----
+#     if booking and booking.event_id:
+#         def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
+#             try:
+#                 m2m_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
+#             except Exception:
+#                 m2m_ids = []
+#             if m2m_ids:
+#                 return m2m_ids
+#             names = _allowed_unit_types_for_package(pkg) or set()
+#             if not names:
+#                 return []
+#             ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
+#             if not ids:
+#                 ids = [ut.id for nm in names
+#                        for ut in [UnitType.objects.filter(name__iexact=nm).first()]
+#                        if ut]
+#             return ids
+
+#         allowed_ids = _allowed_utype_ids_for_package(package)
+#         _dbg("CREATE_ORDER:ALLOWED_UNIT_TYPES",
+#              source="M2M" if list(package.allowed_unit_types.all()) else "FALLBACK",
+#              allowed_ids=allowed_ids,
+#              allowed_names=list(UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)))
+
+#         if not allowed_ids:
+#             return Response({
+#                 "error": "package_has_no_allowed_unit_types",
+#                 "message": "Configure allowed unit types on the package or ensure fallback map matches UnitType names."
+#             }, status=400)
+
+#         taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
+
+#         # IGNORE category here:
+#         qs_free = (Unit.objects
+#                    .filter(unit_type_id__in=allowed_ids, status="AVAILABLE")
+#                    .exclude(id__in=taken_ids)
+#                    .order_by("-capacity"))
+
+#         pool_count = qs_free.count()
+#         needed = max(1, int(booking.guests or 1))
+#         cap = 0
+#         sample = []
+#         for u in qs_free.iterator(chunk_size=500):
+#             if len(sample) < 10:
+#                 sample.append({
+#                     "id": u.id,
+#                     "label": u.label,
+#                     "property": getattr(u.property, "name", ""),
+#                     "unit_type": getattr(u.unit_type, "name", ""),
+#                     "category": u.category,
+#                     "capacity": u.capacity or 1,
+#                 })
+#             cap += (u.capacity or 1)
+#             if cap >= needed:
+#                 break
+
+#         _dbg("CREATE_ORDER:CAPACITY_CHECK_IGNORE_CATEGORY",
+#              needed=needed, cap_seen=cap, pool_count=pool_count,
+#              taken_ids_count=len(taken_ids), sample_units=sample)
+
+#         if cap < needed:
+#             return Response({
+#                 "error": "house_full",
+#                 "message": "No capacity left for this package for the event (category ignored).",
+#                 "debug": {
+#                     "event_id": booking.event_id,
+#                     "package_id": package.id,
+#                     "needed": needed,
+#                     "allowed_unit_type_names": list(
+#                         UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)
+#                     ),
+#                     "pool_units": pool_count,
+#                     "capacity_available": cap,
+#                     "units_sample": sample
+#                 }
+#             }, status=409)
+
+#     # ---- promo ----
+#     promo = booking.promo_code if (booking and booking.promo_code_id) else _get_live_promocode(req_promo_code)
+#     _dbg("CREATE_ORDER:PROMO",
+#          source="booking" if (booking and booking.promo_code_id) else "request",
+#          code=(getattr(promo, "code", None) or None))
+
+#     try:
+#         promo_discount, final_inr, promo_br = _apply_promocode(total_inr, promo)
+#         _dbg("CREATE_ORDER:PROMO_APPLIED",
+#              total_before=total_inr, discount=promo_discount, total_after=final_inr)
+#     except Exception as ex:
+#         _dbg("CREATE_ORDER:PROMO_ERR", err=str(ex))
+#         return Response({"error": "promo_apply_failed", "detail": str(ex)}, status=400)
+
+#     if booking:
+#         try:
+#             if promo_br:
+#                 breakdown = breakdown or {}
+#                 breakdown = {**breakdown, "promo": promo_br}
+#             booking.pricing_total_inr = final_inr
+#             booking.pricing_breakdown = breakdown or booking.pricing_breakdown
+#             booking.guests = guests_total if guests_total is not None else booking.guests
+#             booking.promo_discount_inr = promo_discount
+#             booking.promo_breakdown = promo_br
+#             if promo and not booking.promo_code_id:
+#                 booking.promo_code = promo
+#             booking.save(update_fields=[
+#                 "pricing_total_inr", "pricing_breakdown", "guests",
+#                 "promo_discount_inr", "promo_breakdown", "promo_code"
+#             ])
+#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_OK", booking_id=booking.id, final_inr=final_inr)
+#         except Exception as ex:
+#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_ERR", err=str(ex))
+#             return Response({"error": "pricing_snapshot_failed", "detail": str(ex)}, status=400)
+
+#     amount_paise = max(1, int(final_inr)) * 100
+#     try:
+#         client = _get_razorpay_client()
+#     except RuntimeError as e:
+#         _dbg("CREATE_ORDER:RAZORPAY_CLIENT_ERR", err=str(e))
+#         return Response({"error": str(e)}, status=503)
+
+#     try:
+#         rp_order = client.order.create({
+#             "amount": amount_paise,
+#             "currency": "INR",
+#             "payment_capture": 1,
+#             "notes": {
+#                 "package": package.name,
+#                 "booking_id": booking_id or "",
+#                 "promo_code": (promo and promo.code) or ""
+#             },
+#         })
+#         _dbg("CREATE_ORDER:RP_ORDER_OK", rp_order_id=rp_order.get("id"), amount_paise=amount_paise)
+#     except Exception as e:
+#         _dbg("CREATE_ORDER:RP_ORDER_ERR", err=str(e))
+#         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
+
+#     try:
+#         o = Order.objects.create(
+#             user=request.user,
+#             package=package,
+#             razorpay_order_id=rp_order["id"],
+#             amount=amount_paise,
+#             currency="INR",
+#         )
+#         _dbg("CREATE_ORDER:ORDER_DB_OK", order_db_id=o.id, rp_order_id=o.razorpay_order_id)
+#     except Exception as e:
+#         _dbg("CREATE_ORDER:ORDER_DB_ERR", err=str(e))
+#         return Response({"error": "order_db_create_failed", "detail": str(e)}, status=500)
+
+#     payment_link_url = None
+#     pl_meta = {}
+#     try:
+#         cust = {
+#             "name": (request.user.get_full_name() or request.user.username)[:100],
+#             "email": (getattr(request.user, "email", "") or None),
+#         }
+#         cust = {k: v for k, v in cust.items() if v}
+#         pl_req = {
+#             "amount": amount_paise,
+#             "currency": "INR",
+#             "reference_id": f"orderdb-{o.id}",
+#             "description": f"H2H: {package.name}",
+#             "customer": cust or None,
+#             "notify": {"email": True, "sms": False},
+#             "notes": {
+#                 "package": package.name,
+#                 "local_rp_order": rp_order["id"],
+#                 "booking_id": str(booking_id or ""),
+#                 "promo_code": (promo and promo.code) or "",
+#                 "promo_discount_inr": promo_discount,
+#             },
+#         }
+#         if pl_req.get("customer") is None:
+#             pl_req.pop("customer")
+#         pl = client.payment_link.create(pl_req)
+#         payment_link_url = pl.get("short_url")
+#         if pl.get("order_id"):
+#             o.razorpay_order_id = pl["order_id"]
+#             o.save(update_fields=["razorpay_order_id"])
+#             rp_order["id"] = pl["order_id"]
+#         pl_meta = {"payment_link_id": pl.get("id")}
+#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_OK",
+#              payment_link_id=pl_meta.get("payment_link_id"),
+#              payment_link_url=payment_link_url)
+#     except Exception as e:
+#         pl_meta = {"error": str(e)}
+#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_ERR", err=str(e))
+
+#     if booking:
+#         try:
+#             booking.order = o
+#             booking.save(update_fields=["order"])
+#             _dbg("CREATE_ORDER:BOOKING_LINKED_TO_ORDER", booking_id=booking.id, order_db_id=o.id)
+#         except Exception as e:
+#             _dbg("CREATE_ORDER:BOOKING_LINK_ERR", err=str(e))
+
+#     return Response({
+#         "order": rp_order,
+#         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
+#         "order_db": OrderSerializer(o).data,
+#         "payment_link": payment_link_url,
+#         "payment_link_meta": pl_meta,
+#         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else {
+#             "base": {"includes": package.base_includes, "price_inr": int(package.price_inr)},
+#             "promo": promo_br,
+#             "total_inr_before_promo": total_inr,
+#             "total_inr": final_inr,
+#         },
+#     })
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_order(request):
@@ -1429,7 +1706,6 @@ def create_order(request):
 
         taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
 
-        # IGNORE category here:
         qs_free = (Unit.objects
                    .filter(unit_type_id__in=allowed_ids, status="AVAILABLE")
                    .exclude(id__in=taken_ids)
@@ -1516,6 +1792,7 @@ def create_order(request):
         _dbg("CREATE_ORDER:RAZORPAY_CLIENT_ERR", err=str(e))
         return Response({"error": str(e)}, status=503)
 
+    # ---- Razorpay ORDER (keep this so you can use its id for ticketing) ----
     try:
         rp_order = client.order.create({
             "amount": amount_paise,
@@ -1532,6 +1809,7 @@ def create_order(request):
         _dbg("CREATE_ORDER:RP_ORDER_ERR", err=str(e))
         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
 
+    # ---- Local ORDER row ----
     try:
         o = Order.objects.create(
             user=request.user,
@@ -1545,6 +1823,7 @@ def create_order(request):
         _dbg("CREATE_ORDER:ORDER_DB_ERR", err=str(e))
         return Response({"error": "order_db_create_failed", "detail": str(e)}, status=500)
 
+    # ---- Payment Link (STANDARD) — MUST send amount & currency. DO NOT send order_id. ----
     payment_link_url = None
     pl_meta = {}
     try:
@@ -1553,29 +1832,27 @@ def create_order(request):
             "email": (getattr(request.user, "email", "") or None),
         }
         cust = {k: v for k, v in cust.items() if v}
+
         pl_req = {
             "amount": amount_paise,
             "currency": "INR",
             "reference_id": f"orderdb-{o.id}",
             "description": f"H2H: {package.name}",
-            "customer": cust or None,
             "notify": {"email": True, "sms": False},
             "notes": {
                 "package": package.name,
-                "local_rp_order": rp_order["id"],
+                "local_rp_order": rp_order["id"],  # for webhook fallback correlation
                 "booking_id": str(booking_id or ""),
                 "promo_code": (promo and promo.code) or "",
                 "promo_discount_inr": promo_discount,
             },
         }
-        if pl_req.get("customer") is None:
-            pl_req.pop("customer")
+        if cust:
+            pl_req["customer"] = cust
+
+        _dbg("CREATE_ORDER:PL_REQ", sending={k: v for k, v in pl_req.items() if k != "customer"})
         pl = client.payment_link.create(pl_req)
-        payment_link_url = pl.get("short_url")
-        if pl.get("order_id"):
-            o.razorpay_order_id = pl["order_id"]
-            o.save(update_fields=["razorpay_order_id"])
-            rp_order["id"] = pl["order_id"]
+        payment_link_url = pl.get("short_url") or pl.get("url")
         pl_meta = {"payment_link_id": pl.get("id")}
         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_OK",
              payment_link_id=pl_meta.get("payment_link_id"),
@@ -1593,11 +1870,13 @@ def create_order(request):
             _dbg("CREATE_ORDER:BOOKING_LINK_ERR", err=str(e))
 
     return Response({
-        "order": rp_order,
+        "order": {"id": rp_order["id"], "amount": amount_paise, "currency": "INR"},
         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
         "order_db": OrderSerializer(o).data,
-        "payment_link": payment_link_url,
-        "payment_link_meta": pl_meta,
+        "payment_link": payment_link_url,          # <—— your frontend reads this
+        "payment_link_meta": pl_meta,              # includes .error if creation failed
+        "ticket_order_id": rp_order["id"],         # <—— used by /tickets/<id>.pdf
+        "ticket_api_path": f"/api/tickets/{rp_order['id']}.pdf",
         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else {
             "base": {"includes": package.base_includes, "price_inr": int(package.price_inr)},
             "promo": promo_br,
@@ -1605,6 +1884,288 @@ def create_order(request):
             "total_inr": final_inr,
         },
     })
+
+
+
+# @api_view(["POST"])
+# @permission_classes([IsAuthenticated])
+# def create_order(request):
+#     """
+#     Body:
+#     {
+#       "package_id": 1,
+#       "booking_id": 123,
+#       "promo_code": "H2H10",
+#       "debug": true
+#     }
+
+#     Capacity precheck ignores Booking.category. Only unit_type (from Package) matters.
+#     """
+#     debug_mode = str(request.data.get("debug") or "").lower() in ("1", "true", "yes", "y")
+#     package_id = request.data.get("package_id")
+#     booking_id = request.data.get("booking_id")
+#     req_promo_code = (request.data.get("promo_code") or "").strip() or None
+
+#     _dbg("CREATE_ORDER:ENTRY",
+#          path=getattr(request, "get_full_path", lambda: "")(),
+#          user_id=getattr(request.user, "id", None),
+#          package_id=package_id,
+#          booking_id=booking_id,
+#          req_promo_code=req_promo_code,
+#          debug_mode=debug_mode)
+
+#     if not package_id:
+#         _dbg("CREATE_ORDER:ERR_NO_PACKAGE_ID")
+#         return Response({"error": "package_id required"}, status=400)
+
+#     try:
+#         package = Package.objects.get(id=package_id, active=True)
+#         _dbg("CREATE_ORDER:PACKAGE_OK", package_id=package.id, package_name=package.name)
+#     except Package.DoesNotExist:
+#         _dbg("CREATE_ORDER:ERR_BAD_PACKAGE", package_id=package_id)
+#         return Response({"error": "invalid package"}, status=404)
+
+#     total_inr = int(package.price_inr)
+#     booking = None
+#     breakdown = None
+#     guests_total = None
+
+#     if booking_id:
+#         try:
+#             booking = Booking.objects.get(id=booking_id, user=request.user)
+#             _dbg("CREATE_ORDER:BOOKING_OK",
+#                  booking_id=booking.id,
+#                  event_id=booking.event_id,
+#                  guests=booking.guests,
+#                  category=(booking.category or "").strip().upper())
+#         except Booking.DoesNotExist:
+#             _dbg("CREATE_ORDER:ERR_BAD_BOOKING", booking_id=booking_id)
+#             return Response({"error": "invalid booking_id"}, status=400)
+
+#         try:
+#             total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
+#             _dbg("CREATE_ORDER:PRICING_OK",
+#                  total_inr=total_inr,
+#                  guests_total=guests_total,
+#                  computed_from=(breakdown or {}).get("computed_from"))
+#         except Exception as ex:
+#             _dbg("CREATE_ORDER:PRICING_ERR", err=str(ex))
+#             return Response({"error": "pricing_failed", "detail": str(ex)}, status=400)
+
+#     # ---- capacity precheck (ignore category) ----
+#     if booking and booking.event_id:
+#         def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
+#             try:
+#                 m2m_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
+#             except Exception:
+#                 m2m_ids = []
+#             if m2m_ids:
+#                 return m2m_ids
+#             names = _allowed_unit_types_for_package(pkg) or set()
+#             if not names:
+#                 return []
+#             ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
+#             if not ids:
+#                 ids = [ut.id for nm in names
+#                        for ut in [UnitType.objects.filter(name__iexact=nm).first()]
+#                        if ut]
+#             return ids
+
+#         allowed_ids = _allowed_utype_ids_for_package(package)
+#         _dbg("CREATE_ORDER:ALLOWED_UNIT_TYPES",
+#              source="M2M" if list(package.allowed_unit_types.all()) else "FALLBACK",
+#              allowed_ids=allowed_ids,
+#              allowed_names=list(UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)))
+
+#         if not allowed_ids:
+#             return Response({
+#                 "error": "package_has_no_allowed_unit_types",
+#                 "message": "Configure allowed unit types on the package or ensure fallback map matches UnitType names."
+#             }, status=400)
+
+#         taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
+
+#         qs_free = (Unit.objects
+#                    .filter(unit_type_id__in=allowed_ids, status="AVAILABLE")
+#                    .exclude(id__in=taken_ids)
+#                    .order_by("-capacity"))
+
+#         pool_count = qs_free.count()
+#         needed = max(1, int(booking.guests or 1))
+#         cap = 0
+#         sample = []
+#         for u in qs_free.iterator(chunk_size=500):
+#             if len(sample) < 10:
+#                 sample.append({
+#                     "id": u.id,
+#                     "label": u.label,
+#                     "property": getattr(u.property, "name", ""),
+#                     "unit_type": getattr(u.unit_type, "name", ""),
+#                     "category": u.category,
+#                     "capacity": u.capacity or 1,
+#                 })
+#             cap += (u.capacity or 1)
+#             if cap >= needed:
+#                 break
+
+#         _dbg("CREATE_ORDER:CAPACITY_CHECK_IGNORE_CATEGORY",
+#              needed=needed, cap_seen=cap, pool_count=pool_count,
+#              taken_ids_count=len(taken_ids), sample_units=sample)
+
+#         if cap < needed:
+#             return Response({
+#                 "error": "house_full",
+#                 "message": "No capacity left for this package for the event (category ignored).",
+#                 "debug": {
+#                     "event_id": booking.event_id,
+#                     "package_id": package.id,
+#                     "needed": needed,
+#                     "allowed_unit_type_names": list(
+#                         UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)
+#                     ),
+#                     "pool_units": pool_count,
+#                     "capacity_available": cap,
+#                     "units_sample": sample
+#                 }
+#             }, status=409)
+
+#     # ---- promo ----
+#     promo = booking.promo_code if (booking and booking.promo_code_id) else _get_live_promocode(req_promo_code)
+#     _dbg("CREATE_ORDER:PROMO",
+#          source="booking" if (booking and booking.promo_code_id) else "request",
+#          code=(getattr(promo, "code", None) or None))
+
+#     try:
+#         promo_discount, final_inr, promo_br = _apply_promocode(total_inr, promo)
+#         _dbg("CREATE_ORDER:PROMO_APPLIED",
+#              total_before=total_inr, discount=promo_discount, total_after=final_inr)
+#     except Exception as ex:
+#         _dbg("CREATE_ORDER:PROMO_ERR", err=str(ex))
+#         return Response({"error": "promo_apply_failed", "detail": str(ex)}, status=400)
+
+#     if booking:
+#         try:
+#             if promo_br:
+#                 breakdown = breakdown or {}
+#                 breakdown = {**breakdown, "promo": promo_br}
+#             booking.pricing_total_inr = final_inr
+#             booking.pricing_breakdown = breakdown or booking.pricing_breakdown
+#             booking.guests = guests_total if guests_total is not None else booking.guests
+#             booking.promo_discount_inr = promo_discount
+#             booking.promo_breakdown = promo_br
+#             if promo and not booking.promo_code_id:
+#                 booking.promo_code = promo
+#             booking.save(update_fields=[
+#                 "pricing_total_inr", "pricing_breakdown", "guests",
+#                 "promo_discount_inr", "promo_breakdown", "promo_code"
+#             ])
+#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_OK", booking_id=booking.id, final_inr=final_inr)
+#         except Exception as ex:
+#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_ERR", err=str(ex))
+#             return Response({"error": "pricing_snapshot_failed", "detail": str(ex)}, status=400)
+
+#     amount_paise = max(1, int(final_inr)) * 100
+#     try:
+#         client = _get_razorpay_client()
+#     except RuntimeError as e:
+#         _dbg("CREATE_ORDER:RAZORPAY_CLIENT_ERR", err=str(e))
+#         return Response({"error": str(e)}, status=503)
+
+#     # ---- Razorpay order ----
+#     try:
+#         rp_order = client.order.create({
+#             "amount": amount_paise,
+#             "currency": "INR",
+#             "payment_capture": 1,
+#             "notes": {
+#                 "package": package.name,
+#                 "booking_id": booking_id or "",
+#                 "promo_code": (promo and promo.code) or ""
+#             },
+#         })
+#         _dbg("CREATE_ORDER:RP_ORDER_OK", rp_order_id=rp_order.get("id"), amount_paise=amount_paise)
+#     except Exception as e:
+#         _dbg("CREATE_ORDER:RP_ORDER_ERR", err=str(e))
+#         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
+
+#     # ---- local order ----
+#     try:
+#         o = Order.objects.create(
+#             user=request.user,
+#             package=package,
+#             razorpay_order_id=rp_order["id"],
+#             amount=amount_paise,
+#             currency="INR",
+#         )
+#         _dbg("CREATE_ORDER:ORDER_DB_OK", order_db_id=o.id, rp_order_id=o.razorpay_order_id)
+#     except Exception as e:
+#         _dbg("CREATE_ORDER:ORDER_DB_ERR", err=str(e))
+#         return Response({"error": "order_db_create_failed", "detail": str(e)}, status=500)
+
+#     # ---- Payment Link (BOUND to SAME order_id; NO amount/currency here) ----
+#     payment_link_url = None
+#     pl_meta = {}
+#     try:
+#         cust = {
+#             "name": (request.user.get_full_name() or request.user.username)[:100],
+#             "email": (getattr(request.user, "email", "") or None),
+#         }
+#         cust = {k: v for k, v in cust.items() if v}
+
+#         pl_req = {
+#             "reference_id": f"orderdb-{o.id}",
+#             "description": f"H2H: {package.name}",
+#             "notify": {"email": True, "sms": False},
+#             "notes": {
+#                 "package": package.name,
+#                 "local_rp_order": rp_order["id"],
+#                 "booking_id": str(booking_id or ""),
+#                 "promo_code": (promo and promo.code) or "",
+#                 "promo_discount_inr": promo_discount,
+#             },
+#             "order_id": rp_order["id"],  # ******** key line: bind PL to the same order ********
+#         }
+#         if cust:
+#             pl_req["customer"] = cust
+
+#         _dbg("CREATE_ORDER:PL_REQ", sending={k: v for k, v in pl_req.items() if k != "customer"})
+#         pl = client.payment_link.create(pl_req)
+#         payment_link_url = pl.get("short_url") or pl.get("url")
+#         pl_meta = {"payment_link_id": pl.get("id"), "order_id": pl.get("order_id")}
+#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_OK",
+#              payment_link_id=pl_meta.get("payment_link_id"),
+#              pl_order_id=pl_meta.get("order_id"),
+#              payment_link_url=payment_link_url)
+#         # DO NOT overwrite o.razorpay_order_id here; it is already the canonical one.
+#     except Exception as e:
+#         pl_meta = {"error": str(e)}
+#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_ERR", err=str(e))
+
+#     if booking:
+#         try:
+#             booking.order = o
+#             booking.save(update_fields=["order"])
+#             _dbg("CREATE_ORDER:BOOKING_LINKED_TO_ORDER", booking_id=booking.id, order_db_id=o.id)
+#         except Exception as e:
+#             _dbg("CREATE_ORDER:BOOKING_LINK_ERR", err=str(e))
+
+#     return Response({
+#         "order": {"id": rp_order["id"], "amount": amount_paise, "currency": "INR"},
+#         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
+#         "order_db": OrderSerializer(o).data,
+#         "payment_link": payment_link_url,
+#         "payment_link_meta": pl_meta,
+#         "ticket_order_id": rp_order["id"],
+#         "ticket_api_path": f"/api/tickets/{rp_order['id']}.pdf",
+#         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else {
+#             "base": {"includes": package.base_includes, "price_inr": int(package.price_inr)},
+#             "promo": promo_br,
+#             "total_inr_before_promo": total_inr,
+#             "total_inr": final_inr,
+#         },
+#     })
+
+
 
 
 # -----------------------------------
@@ -1754,39 +2315,455 @@ def razorpay_webhook(request):
         return HttpResponse("error", status=500)
 
 
+
+
+
 # -----------------------------------
 # Ticket PDF (unchanged)
 # -----------------------------------
+
+
+
+
+from rest_framework import renderers
+from rest_framework.decorators import renderer_classes
+
+class PassthroughPDFRenderer(renderers.BaseRenderer):
+    """
+    Accepts Accept: application/pdf so DRF doesn't 406 before our view runs.
+    We still return HttpResponse(pdf_bytes), so this is a no-op renderer.
+    """
+    media_type = "application/pdf"
+    format = "pdf"
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+# ---------- Tickets (PDF) ----------
+
 @api_view(["GET"])
-# @permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated])
+@renderer_classes([PassthroughPDFRenderer, renderers.JSONRenderer, renderers.BrowsableAPIRenderer])
 def ticket_pdf(request, razorpay_order_id: str):
-    # Fetch only the caller’s order
+    _dbg("TICKET:ENTRY",
+         path=getattr(request, "get_full_path", lambda: "")(),
+         is_auth=getattr(request.user, "is_authenticated", False),
+         user_id=getattr(request.user, "id", None),
+         rp_order_id=razorpay_order_id)
+
+    # Strictly fetch the caller’s order
     try:
-        o = (
-            Order.objects.select_related("user", "package")
-            .get(razorpay_order_id=razorpay_order_id, user=request.user)
-        )
+        o = (Order.objects
+             .select_related("user", "package", "booking", "booking__event", "booking__property")
+             .get(razorpay_order_id=razorpay_order_id, user_id=request.user.id))
     except Order.DoesNotExist:
+        any_o = Order.objects.filter(razorpay_order_id=razorpay_order_id).first()
+        if any_o:
+            _dbg("TICKET:ORDER_FOUND_WRONG_USER",
+                 req_user_id=request.user.id, owner_id=any_o.user_id, rp_order_id=razorpay_order_id)
+            return Response({"error": "forbidden"}, status=403)
+        _dbg("TICKET:ORDER_NOT_FOUND", rp_order_id=razorpay_order_id)
         return Response({"error": "not found"}, status=404)
 
-    # Must be paid
     if not o.paid:
+        _dbg("TICKET:UNPAID", rp_order_id=razorpay_order_id)
         return Response({"error": "payment not completed"}, status=400)
 
-    # Build ONE PDF: Page 1 Invoice + Page 2 Pass
+    # Optional: dates/venue from booking
+    travel_dates = None
+    venue = "Highway to Heal"
+    if getattr(o, "booking", None):
+        if getattr(o.booking, "event", None) and o.booking.event.start_date:
+            travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
+        if getattr(o.booking, "property", None) and o.booking.property.name:
+            venue = o.booking.property.name
+
     try:
         pdf_bytes = build_invoice_and_pass_pdf_from_order(
             order=o,
-            verify_url_base=None,              # or your verify endpoint
-            logo_filename="Logo.png",          # exact filename & case
-            pass_bg_filename="backimage.jpg",  # background image for pass
-            travel_dates="16 Nov 2025",        # optional
-            venue="Mystic Meadow, Pahalgam, Kashmir",
+            verify_url_base=getattr(settings, "TICKET_VERIFY_URL", None),
+            logo_filename="Logo.png",
+            pass_bg_filename="backimage.jpg",
+            travel_dates=travel_dates,
+            venue=venue,
         )
     except Exception as e:
-        # Temporary visibility to debug root cause
+        _dbg("TICKET:PDF_RENDER_FAILED", err=str(e))
         return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
 
     resp = HttpResponse(pdf_bytes, content_type="application/pdf")
     resp["Content-Disposition"] = f'attachment; filename=H2H_{o.razorpay_order_id}.pdf'
+    _dbg("TICKET:SUCCESS", rp_order_id=o.razorpay_order_id, user_id=o.user_id)
     return resp
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@renderer_classes([PassthroughPDFRenderer, renderers.JSONRenderer, renderers.BrowsableAPIRenderer])
+def ticket_pdf_by_order_id(request, order_id: int):
+    _dbg("TICKET:ENTRY_BY_ORDER_ID",
+         path=getattr(request, "get_full_path", lambda: "")(),
+         is_auth=getattr(request.user, "is_authenticated", False),
+         user_id=getattr(request.user, "id", None),
+         order_id=order_id)
+
+    try:
+        o = (Order.objects
+             .select_related("user", "package", "booking", "booking__event", "booking__property")
+             .get(id=order_id, user_id=request.user.id))
+    except Order.DoesNotExist:
+        _dbg("TICKET:ORDER_ID_NOT_FOUND", order_id=order_id)
+        return Response({"error": "not found"}, status=404)
+
+    if not o.paid:
+        _dbg("TICKET:UNPAID_BY_ORDER_ID", order_id=order_id)
+        return Response({"error": "payment not completed"}, status=400)
+
+    travel_dates = None
+    venue = "Highway to Heal"
+    if getattr(o, "booking", None):
+        if getattr(o.booking, "event", None) and o.booking.event.start_date:
+            travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
+        if getattr(o.booking, "property", None) and o.booking.property.name:
+            venue = o.booking.property.name
+
+    try:
+        pdf_bytes = build_invoice_and_pass_pdf_from_order(
+            order=o,
+            verify_url_base=getattr(settings, "TICKET_VERIFY_URL", None),
+            logo_filename="Logo.png",
+            pass_bg_filename="backimage.jpg",
+            travel_dates=travel_dates,
+            venue=venue,
+        )
+    except Exception as e:
+        _dbg("TICKET:PDF_RENDER_FAILED_BY_ORDER_ID", err=str(e), order_id=order_id)
+        return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
+
+    resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+    resp["Content-Disposition"] = f'attachment; filename=H2H_ORDER_{o.id}.pdf'
+    _dbg("TICKET:SUCCESS_BY_ORDER_ID", order_id=o.id, user_id=o.user_id)
+    return resp
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@renderer_classes([PassthroughPDFRenderer, renderers.JSONRenderer, renderers.BrowsableAPIRenderer])
+def ticket_pdf_by_booking_id(request, booking_id: int):
+    _dbg("TICKET:ENTRY_BY_BOOKING_ID",
+         path=getattr(request, "get_full_path", lambda: "")(),
+         is_auth=getattr(request.user, "is_authenticated", False),
+         user_id=getattr(request.user, "id", None),
+         booking_id=booking_id)
+
+    try:
+        b = (Booking.objects
+             .select_related("order", "event", "property", "user")
+             .get(id=booking_id, user_id=request.user.id))
+    except Booking.DoesNotExist:
+        _dbg("TICKET:BOOKING_NOT_FOUND", booking_id=booking_id)
+        return Response({"error": "not found"}, status=404)
+
+    if not b.order_id:
+        _dbg("TICKET:BOOKING_HAS_NO_ORDER", booking_id=booking_id)
+        return Response({"error": "order not found for booking"}, status=404)
+
+    o = (Order.objects
+         .select_related("user", "package", "booking", "booking__event", "booking__property")
+         .get(id=b.order_id))
+
+    if not o.paid:
+        _dbg("TICKET:UNPAID_BY_BOOKING_ID", booking_id=booking_id, order_id=o.id)
+        return Response({"error": "payment not completed"}, status=400)
+
+    travel_dates = None
+    venue = "Highway to Heal"
+    if getattr(o, "booking", None):
+        if getattr(o.booking, "event", None) and o.booking.event.start_date:
+            travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
+        if getattr(o.booking, "property", None) and o.booking.property.name:
+            venue = o.booking.property.name
+
+    try:
+        pdf_bytes = build_invoice_and_pass_pdf_from_order(
+            order=o,
+            verify_url_base=getattr(settings, "TICKET_VERIFY_URL", None),
+            logo_filename="Logo.png",
+            pass_bg_filename="backimage.jpg",
+            travel_dates=travel_dates,
+            venue=venue,
+        )
+    except Exception as e:
+        _dbg("TICKET:PDF_RENDER_FAILED_BY_BOOKING_ID", err=str(e), booking_id=booking_id)
+        return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
+
+    resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+    resp["Content-Disposition"] = f'attachment; filename=H2H_BOOKING_{b.id}.pdf'
+    _dbg("TICKET:SUCCESS_BY_BOOKING_ID", booking_id=b.id, order_id=o.id, user_id=o.user_id)
+    return resp
+
+
+def _pretty_ticket_filename(order, *, kind="ORDER"):
+    """
+    Build a readable, safe filename:
+    H2H_2025_swiss-tent_rohit-singh_ORDER_21.pdf
+    """
+    user_name = (getattr(order.user, "get_full_name", lambda: "")() or order.user.username or "guest").strip()
+    pkg_name = (getattr(order.package, "name", "") or "package").strip()
+    evt_year = getattr(getattr(getattr(order, "booking", None), "event", None), "year", None)
+
+    parts = [
+        "H2H",
+        str(evt_year) if evt_year else None,
+        slugify(pkg_name) or "ticket",
+        slugify(user_name) or None,
+        f"{kind}_{order.id}",
+    ]
+    base = "_".join([p for p in parts if p]) + ".pdf"
+    ascii_name = base.encode("ascii", "ignore").decode() or "ticket.pdf"  # fallback
+    utf8_name = quote(base)
+    return ascii_name, utf8_name
+
+
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def ticket_pdf(request, razorpay_order_id: str):
+#     # Fetch only the caller’s order
+#     try:
+#         o = (
+#             Order.objects.select_related("user", "package")
+#             .get(razorpay_order_id=razorpay_order_id, user=request.user)
+#         )
+#     except Order.DoesNotExist:
+#         return Response({"error": "not found"}, status=404)
+
+#     # Must be paid
+#     if not o.paid:
+#         return Response({"error": "payment not completed"}, status=400)
+
+#     # Build ONE PDF: Page 1 Invoice + Page 2 Pass
+#     try:
+#         pdf_bytes = build_invoice_and_pass_pdf_from_order(
+#             order=o,
+#             verify_url_base=None,              # or your verify endpoint
+#             logo_filename="Logo.png",          # exact filename & case
+#             pass_bg_filename="backimage.jpg",  # background image for pass
+#             travel_dates="16 Nov 2025",        # optional
+#             venue="Mystic Meadow, Pahalgam, Kashmir",
+#         )
+#     except Exception as e:
+#         # Temporary visibility to debug root cause
+#         return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
+
+#     resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+#     resp["Content-Disposition"] = f'attachment; filename=H2H_{o.razorpay_order_id}.pdf'
+#     return resp
+
+# from urllib.parse import quote
+# from django.utils.text import slugify
+
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def ticket_pdf(request, razorpay_order_id: str):
+#     _dbg("TICKET:ENTRY",
+#          path=getattr(request, "get_full_path", lambda: "")(),
+#          is_auth=getattr(request.user, "is_authenticated", False),
+#          user_id=getattr(request.user, "id", None),
+#          rp_order_id=razorpay_order_id)
+
+#     # Strictly fetch the caller’s order
+#     try:
+#         o = (Order.objects
+#              .select_related("user", "package", "booking", "booking__event", "booking__property")
+#              .get(razorpay_order_id=razorpay_order_id, user_id=request.user.id))
+#     except Order.DoesNotExist:
+#         any_o = Order.objects.filter(razorpay_order_id=razorpay_order_id).first()
+#         if any_o:
+#             _dbg("TICKET:ORDER_FOUND_WRONG_USER",
+#                  req_user_id=request.user.id, owner_id=any_o.user_id, rp_order_id=razorpay_order_id)
+#             return Response({"error": "forbidden"}, status=403)
+#         _dbg("TICKET:ORDER_NOT_FOUND", rp_order_id=razorpay_order_id)
+#         return Response({"error": "not found"}, status=404)
+
+#     if not o.paid:
+#         _dbg("TICKET:UNPAID", rp_order_id=razorpay_order_id)
+#         return Response({"error": "payment not completed"}, status=400)
+
+#     # Optional: dates/venue from booking
+#     travel_dates = None
+#     venue = "Highway to Heal"
+#     if getattr(o, "booking", None):
+#         if getattr(o.booking, "event", None) and o.booking.event.start_date:
+#             travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
+#         if getattr(o.booking, "property", None) and o.booking.property.name:
+#             venue = o.booking.property.name
+
+#     try:
+#         pdf_bytes = build_invoice_and_pass_pdf_from_order(
+#             order=o,
+#             verify_url_base=getattr(settings, "TICKET_VERIFY_URL", None),
+#             logo_filename="Logo.png",
+#             pass_bg_filename="backimage.jpg",
+#             travel_dates=travel_dates,
+#             venue=venue,
+#         )
+#     except Exception as e:
+#         _dbg("TICKET:PDF_RENDER_FAILED", err=str(e))
+#         return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
+
+#     resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+#     resp["Content-Disposition"] = f'attachment; filename=H2H_{o.razorpay_order_id}.pdf'
+#     _dbg("TICKET:SUCCESS", rp_order_id=o.razorpay_order_id, user_id=o.user_id)
+#     return resp
+
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def ticket_pdf_by_order_id(request, order_id: int):
+#     _dbg("TICKET:ENTRY_BY_ORDER_ID",
+#          path=getattr(request, "get_full_path", lambda: "")(),
+#          is_auth=getattr(request, "is_authenticated", False),
+#          user_id=getattr(request.user, "id", None),
+#          order_id=order_id)
+
+#     try:
+#         o = (Order.objects
+#              .select_related("user", "package", "booking", "booking__event", "booking__property")
+#              .get(id=order_id, user_id=request.user.id))
+#     except Order.DoesNotExist:
+#         _dbg("TICKET:ORDER_ID_NOT_FOUND", order_id=order_id)
+#         return Response({"error": "not found"}, status=404)
+
+#     if not o.paid:
+#         _dbg("TICKET:UNPAID_BY_ORDER_ID", order_id=order_id)
+#         return Response({"error": "payment not completed"}, status=400)
+
+#     # Optional: dates/venue from booking
+#     travel_dates = None
+#     venue = "Highway to Heal"
+#     if getattr(o, "booking", None):
+#         if getattr(o.booking, "event", None) and o.booking.event.start_date:
+#             travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
+#         if getattr(o.booking, "property", None) and o.booking.property.name:
+#             venue = o.booking.property.name
+
+#     try:
+#         pdf_bytes = build_invoice_and_pass_pdf_from_order(
+#             order=o,
+#             verify_url_base=getattr(settings, "TICKET_VERIFY_URL", None),
+#             logo_filename="Logo.png",
+#             pass_bg_filename="backimage.jpg",
+#             travel_dates=travel_dates,
+#             venue=venue,
+#         )
+#     except Exception as e:
+#         _dbg("TICKET:PDF_RENDER_FAILED_BY_ORDER_ID", err=str(e), order_id=order_id)
+#         return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
+
+#     resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+#     resp["Content-Disposition"] = f'attachment; filename=H2H_ORDER_{o.id}.pdf'
+#     _dbg("TICKET:SUCCESS_BY_ORDER_ID", order_id=o.id, user_id=o.user_id)
+#     # ascii_name, utf8_name = _pretty_ticket_filename(o, kind="ORDER")
+#     # resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+#     # resp["Content-Disposition"] = (
+#     #     f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_name}"
+#     # )
+#     return resp
+
+
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def ticket_pdf_by_booking_id(request, booking_id: int):
+#     _dbg("TICKET:ENTRY_BY_BOOKING_ID",
+#          path=getattr(request, "get_full_path", lambda: "")(),
+#          is_auth=getattr(request, "is_authenticated", False),
+#          user_id=getattr(request.user, "id", None),
+#          booking_id=booking_id)
+
+#     try:
+#         b = (Booking.objects
+#              .select_related("order", "event", "property", "user")
+#              .get(id=booking_id, user_id=request.user.id))
+#     except Booking.DoesNotExist:
+#         _dbg("TICKET:BOOKING_NOT_FOUND", booking_id=booking_id)
+#         return Response({"error": "not found"}, status=404)
+
+#     if not b.order_id:
+#         _dbg("TICKET:BOOKING_HAS_NO_ORDER", booking_id=booking_id)
+#         return Response({"error": "order not found for booking"}, status=404)
+
+#     o = (Order.objects
+#          .select_related("user", "package", "booking", "booking__event", "booking__property")
+#          .get(id=b.order_id))
+
+#     if not o.paid:
+#         _dbg("TICKET:UNPAID_BY_BOOKING_ID", booking_id=booking_id, order_id=o.id)
+#         return Response({"error": "payment not completed"}, status=400)
+
+#     # Optional: dates/venue from booking
+#     travel_dates = None
+#     venue = "Highway to Heal"
+#     if getattr(o, "booking", None):
+#         if getattr(o.booking, "event", None) and o.booking.event.start_date:
+#             travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
+#         if getattr(o.booking, "property", None) and o.booking.property.name:
+#             venue = o.booking.property.name
+
+#     try:
+#         pdf_bytes = build_invoice_and_pass_pdf_from_order(
+#             order=o,
+#             verify_url_base=getattr(settings, "TICKET_VERIFY_URL", None),
+#             logo_filename="Logo.png",
+#             pass_bg_filename="backimage.jpg",
+#             travel_dates=travel_dates,
+#             venue=venue,
+#         )
+#     except Exception as e:
+#         _dbg("TICKET:PDF_RENDER_FAILED_BY_BOOKING_ID", err=str(e), booking_id=booking_id)
+#         return Response({"error": "pdf_render_failed", "detail": repr(e)}, status=500)
+
+#     resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+#     resp["Content-Disposition"] = f'attachment; filename=H2H_BOOKING_{b.id}.pdf'
+#     _dbg("TICKET:SUCCESS_BY_BOOKING_ID", booking_id=b.id, order_id=o.id, user_id=o.user_id)
+#     return resp
+
+
+
+# def _pretty_ticket_filename(order, *, kind="ORDER"):
+#     """
+#     Build a readable, safe filename:
+#     H2H_2025_swiss-tent_rohit-singh_ORDER_21.pdf
+#     """
+#     user_name = (getattr(order.user, "get_full_name", lambda: "")() or order.user.username or "guest").strip()
+#     pkg_name = (getattr(order.package, "name", "") or "package").strip()
+#     evt_year = getattr(getattr(getattr(order, "booking", None), "event", None), "year", None)
+
+#     parts = [
+#         "H2H",
+#         str(evt_year) if evt_year else None,
+#         slugify(pkg_name) or "ticket",
+#         slugify(user_name) or None,
+#         f"{kind}_{order.id}",
+#     ]
+#     base = "_".join([p for p in parts if p]) + ".pdf"
+#     # RFC 6266: provide ASCII fallback + UTF-8 version
+#     ascii_name = base.encode("ascii", "ignore").decode() or "ticket.pdf"
+#     utf8_name = quote(base)
+#     return ascii_name, utf8_name
+
+from django.contrib.auth import logout as dj_logout
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])  # you may switch to AllowAny if you want idempotent logout
+def logout_view(request):
+    """
+    Server-side logout: clears the Django session.
+    Frontend sends X-CSRFToken (you already prime it via /health).
+    """
+    dj_logout(request)
+    # Optional: explicitly clear cookies on the response (sessionid is HttpOnly)
+    resp = Response({"ok": True})
+    resp.delete_cookie("sessionid", path="/")
+    return resp
+
