@@ -18,4 +18,5 @@ urlpatterns = [
     path("tickets/order/<int:order_id>.pdf", views.ticket_pdf_by_order_id, name="ticket_pdf_by_order_id"),
     path("tickets/booking/<int:booking_id>.pdf", views.ticket_pdf_by_booking_id, name="ticket_pdf_by_booking_id"),
     path("auth/logout", views.logout_view, name="logout"),
+    path("auth/sso/login", views.login_redirect, name="auth-login"),
 ]

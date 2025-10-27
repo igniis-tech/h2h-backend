@@ -9,6 +9,10 @@ from django.db import transaction
 from django.utils.text import slugify
 import csv, io, re
 
+from django.db import models as dj_models
+from django.forms import Textarea
+from django.db.models import Prefetch
+
 from .models import (
     UserProfile, Package, Order, WebhookEvent,
     Property, UnitType, Unit,
@@ -16,6 +20,7 @@ from .models import (
     Event, EventDay,
     InventoryRow,
     PromoCode,
+    SightseeingRegistration,
 )
 
 
@@ -36,49 +41,26 @@ class UserProfileAdmin(admin.ModelAdmin):
     search_fields = ("user__username", "user__email", "cognito_sub", "full_name", "phone_number")
 
 
-# @admin.register(Package)
-# class PackageAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "name", "price_inr", "active",
-#         "base_includes", "extra_price_adult_inr",
-#         "child_free_max_age", "child_half_max_age", "child_half_multiplier",
-#     )
-#     list_filter = ("active",)
-#     search_fields = ("name",)
-#     fieldsets = (
-#         (None, {"fields": ("name", "description", "active")}),
-#         ("Pricing", {
-#             "fields": (
-#                 "price_inr", "base_includes", "extra_price_adult_inr",
-#                 "child_free_max_age", "child_half_max_age", "child_half_multiplier"
-#             ),
-#             "description": (
-#                 "Base price includes 'base_includes' people. "
-#                 "Extra adult: 'extra_price_adult_inr' (or base if 0). "
-#                 "Child ≤ free_max -> free; ≤ half_max -> half multiplier."
-#             ),
-#         }),
-#     )
 
+
+
+# admin.py
 @admin.register(Package)
-class PackageAdmin(admin.ModelAdmin):   # ← not models.ModelAdmin
+class PackageAdmin(admin.ModelAdmin):
     list_display = (
-        "name", "price_inr", "active",
+        "name", "price_inr", "active", "promo_active",
         "base_includes", "extra_price_adult_inr",
         "child_free_max_age", "child_half_max_age", "child_half_multiplier",
     )
-    list_filter = ("active",)
+    list_filter = ("active", "promo_active")
     search_fields = ("name",)
-
-    # leave this ONLY if your Package model actually has this M2M field
     filter_horizontal = ("allowed_unit_types",)
 
     fieldsets = (
-        (None, {"fields": ("name", "description", "active")}),
+        (None, {"fields": ("name", "description", "active", "promo_active")}),
         ("Unit selection", {
-            "fields": ("allowed_unit_types",),   # needs M2M to exist
-            "description": "Choose one or more unit types for this package. "
-                           "If empty, the fallback map is used."
+            "fields": ("allowed_unit_types",),
+            "description": "Choose one or more unit types for this package. If empty, the fallback map is used."
         }),
         ("Pricing", {
             "fields": (
@@ -87,6 +69,7 @@ class PackageAdmin(admin.ModelAdmin):   # ← not models.ModelAdmin
             ),
         }),
     )
+
 
 
 
@@ -149,29 +132,169 @@ class PromoCodeAdmin(admin.ModelAdmin):
         return ()
     
 
+
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
+    # ------- List page -------
     list_display = (
         "id", "user", "event", "property", "unit_type", "category",
-        "guests", "pricing_total_inr", "status",
-        "promo_code", "promo_discount_inr",  # ADD
+        "guests",
+        "primary_gender", "primary_meal_preference",   # ← NEW
+        "party_brief",                                 # ← NEW (computed)
+        "alloc_brief",                                 # ← NEW (computed)
+        "pricing_total_inr", "status",
+        "promo_code", "promo_discount_inr",
         "created_at",
     )
-    list_filter = ("event", "property", "unit_type", "category", "status")
-    search_fields = ("id", "user__username", "user__email")
-    readonly_fields = ("pricing_total_inr", "pricing_breakdown", "promo_breakdown")  # ADD
+    list_filter = (
+        "event", "property", "unit_type", "category", "status",
+        "primary_gender", "primary_meal_preference",   # ← NEW
+    )
+    search_fields = (
+        "id", "user__username", "user__email", "order__razorpay_order_id",
+    )
+
+    # Make JSON fields easier to edit (simple textarea without extra deps)
+    formfield_overrides = {
+        dj_models.JSONField: {"widget": Textarea(attrs={"rows": 6, "cols": 100})},
+    }
+
+    readonly_fields = (
+        "pricing_total_inr", "pricing_breakdown", "promo_breakdown",
+        "party_brief",   # ← NEW
+        "alloc_brief",   # ← NEW
+    )
+
     fieldsets = (
         ("Core", {"fields": ("user", "event", "order", "status")}),
         ("Inventory Slice", {"fields": ("property", "unit_type", "category")}),
         ("Dates", {"fields": ("check_in", "check_out")}),
         ("Guests", {"fields": ("guests", "guest_ages", "extra_adults", "extra_children_half", "extra_children_free")}),
+        ("Party & Preferences", {  # ← NEW
+            "fields": ("primary_gender","primary_age", "primary_meal_preference", "companions", "party_brief"),
+            "description": "Primary + companions with genders and meals. Companions are stored as JSON.",
+        }),
         ("Safety", {"fields": ("blood_group", "emergency_contact_name", "emergency_contact_phone")}),
         ("Pricing Snapshot", {"fields": ("pricing_total_inr", "pricing_breakdown")}),
-        ("Promotion", {  # ADD
+        ("Promotion", {
             "fields": ("promo_code", "promo_discount_inr", "promo_breakdown"),
             "description": "Snapshot captured at order creation.",
         }),
+        ("Allocation", {  # ← NEW (read-only summary)
+            "fields": ("alloc_brief",),
+            "description": "Units allocated to this booking.",
+        }),
     )
+
+    # Prefetch related for the allocation summary to avoid N+1
+    # def get_queryset(self, request):
+    #     qs = super().get_queryset(request)
+    #     return qs.prefetch_related(
+    #         "allocation_set__unit__property",
+    #         "allocation_set__unit__unit_type"
+    #     ).select_related("order", "event", "property", "unit_type", "user")
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        rel_name = Allocation._meta.get_field("booking").remote_field.get_accessor_name()
+        return qs.prefetch_related(
+            Prefetch(
+                rel_name,
+                queryset=Allocation.objects.select_related("unit__property", "unit__unit_type"),
+            )
+        ).select_related("order", "event", "property", "unit_type", "user")
+    
+    # def get_queryset(self, request):
+    #     qs = super().get_queryset(request)
+    #     return qs.prefetch_related(
+    #         # was: 'allocation_set__unit__property'
+    #         Prefetch(
+    #             'allocations',  # <- use the related_name
+    #             queryset=Allocation.objects.select_related('unit__property', 'unit__unit_type')
+    #         )
+    #     )
+
+    # ---------- Computed columns / fields ----------
+
+    def party_brief(self, obj):
+        """
+        Example: '4 ppl • Genders M2/F1/O1 • Meals VEG2/NON_VEG1/JAIN1'
+        Uses primary + companions JSON.
+        """
+        # counts
+        g_map = {"M": 0, "F": 0, "O": 0}
+        m_map = {"VEG": 0, "NON_VEG": 0, "VEGAN": 0, "JAIN": 0, "OTHER": 0}
+
+        def norm_gender(val):
+            v = (val or "").strip().upper()
+            return v if v in g_map else "O"
+
+        def norm_meal(val):
+            v = (val or "").strip().upper().replace("-", "").replace(" ", "")
+            if v in {"VEG", "VEGETARIAN", "V"}:
+                return "VEG"
+            if v in {"NONVEG", "NONVEGETARIAN", "NV", "N", "EGG", "EGGETARIAN", "CHICKEN", "MEAT"}:
+                return "NON_VEG"
+            if v in {"VEGAN", "VG"}:
+                return "VEGAN"
+            if v == "JAIN":
+                return "JAIN"
+            return "OTHER"
+
+        # primary
+        g_map[norm_gender(getattr(obj, "primary_gender", None))] += 1
+        # If you store a separate primary meal field:
+        m_map[norm_meal(getattr(obj, "primary_meal_preference", None))] += 1
+
+        # companions
+        comps = getattr(obj, "companions", None) or []
+        for c in comps:
+            if not isinstance(c, dict):
+                continue
+            g_map[norm_gender(c.get("gender"))] += 1
+            m_map[norm_meal(c.get("meal") or c.get("meal_preference"))] += 1
+
+        ppl = 1 + sum(1 for c in comps if isinstance(c, dict) and (c.get("name") or "").strip())
+        genders = f"M{g_map['M']}/F{g_map['F']}/O{g_map['O']}"
+        # show only non-zero meal buckets to keep it compact
+        meal_parts = [f"{k}{v}" for k, v in m_map.items() if v]
+        meals = "/".join(meal_parts) if meal_parts else "—"
+        return f"{ppl} ppl • Genders {genders} • Meals {meals}"
+    party_brief.short_description = "Party (summary)"
+    
+    def alloc_brief(self, obj):
+        """
+        Example: 'Green Meadows / SWISS TENT / DT-N002 | Blue Camp / DOME TENT / DT-5'
+        """
+        try:
+            # Find the correct reverse accessor at runtime (allocations vs allocation_set)
+            rel_name = Allocation._meta.get_field("booking").remote_field.get_accessor_name()
+            manager = getattr(obj, rel_name, None) or getattr(obj, "allocation_set", None)
+
+            if manager is not None:
+                allocs = list(manager.all())
+            else:
+                # Ultimate fallback (shouldn’t be needed if FK is set up correctly)
+                allocs = list(
+                    Allocation.objects.filter(booking=obj).select_related("unit__property", "unit__unit_type")
+                )
+        except Exception:
+            return "—"
+
+        parts = []
+        for a in allocs:
+            u = getattr(a, "unit", None)
+            if not u:
+                continue
+            prop  = getattr(getattr(u, "property", None), "name", "") or "—"
+            utype = getattr(getattr(u, "unit_type", None), "name", "") or "—"
+            # show the same label you see on the invoice
+            label = getattr(u, "label", None) or f"Unit#{getattr(u, 'id', '—')}"
+            parts.append(f"{prop} / {utype} / {label}")
+
+        return " | ".join(parts) if parts else "—"
+
+
     
     
 @admin.register(Allocation)
@@ -641,3 +764,12 @@ class InventoryRowAdmin(admin.ModelAdmin):
             sample_url="admin:h2h_inventoryrow_sample",
         )
         return render(request, "admin/inventory_rows_import.html", context)
+
+
+
+
+@admin.register(SightseeingRegistration)
+class SightseeingRegistrationAdmin(admin.ModelAdmin):
+    list_display = ("id", "booking", "user", "guests", "status", "pay_at_venue", "created_at")
+    list_filter = ("status", "pay_at_venue")
+    search_fields = ("booking__id", "user__username", "user__email")
