@@ -15,7 +15,15 @@ from django.db.models import Exists, OuterRef
 from django.db.models import Prefetch
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from collections import defaultdict, Counter
 from rest_framework.response import Response
+
+import secrets
+from urllib.parse import quote
+from django.shortcuts import redirect
+from django.conf import settings
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 
 from django.contrib.auth import logout as dj_logout
 
@@ -36,7 +44,8 @@ from .models import (
     Allocation,
     Event,
     EventDay,
-    PromoCode, 
+    PromoCode,
+    SightseeingRegistration, 
 )
 from .serializers import (
     PackageSerializer,
@@ -59,6 +68,7 @@ from .auth_utils import (
 from .pdf import build_invoice_and_pass_pdf_from_order
 from h2h import models
 logger = logging.getLogger("h2h.create_booking")
+log = logging.getLogger("h2h")
 @api_view(["GET"])
 @permission_classes([AllowAny])
 @ensure_csrf_cookie
@@ -74,6 +84,72 @@ def api_docs(request):
     if not default_base.endswith("/"):
         default_base += "/"
     return render(request, "index.html", {"default_base": default_base})
+
+
+def _finalize_sightseeing_if_requested(booking):
+    """
+    Create a SightseeingRegistration ONLY if:
+      - user opted in (pending flag is True),
+      - and we don't already have a sightseeing row,
+      - and order is paid.
+    """
+    try:
+        if not booking:
+            return
+        if not getattr(booking, "order_id", None):
+            return
+        if not booking.order.paid:
+            return
+        if not getattr(booking, "sightseeing_opt_in_pending", False):
+            return
+        if hasattr(booking, "sightseeing") and booking.sightseeing:
+            # already created (idempotent)
+            booking.sightseeing_opt_in_pending = False
+            booking.save(update_fields=["sightseeing_opt_in_pending"])
+            return
+
+        # decide headcount & optional participants snapshot
+        guests = max(1, int(booking.sightseeing_requested_count or booking.guests or 1))
+        participants = []
+
+        # Primary first
+        participants.append({
+            "name": getattr(getattr(booking.user, "profile", None), "full_name", None)
+                    or booking.user.get_full_name()
+                    or booking.user.username,
+            "role": "Primary",
+            "gender": (booking.primary_gender or "O"),
+            "meal": (booking.primary_meal_preference or "NONE"),
+            "age": (booking.primary_age or None),
+        })
+
+        # Companions
+        comps = getattr(booking, "companions", None) or []
+        for c in comps:
+            name = (c or {}).get("name") or "—"
+            participants.append({
+                "name": name,
+                "role": "Companion",
+                "gender": (c or {}).get("gender") or "O",
+                "meal": (c or {}).get("meal") or (c or {}).get("meal_preference") or "NONE",
+                "age": (c or {}).get("age"),
+            })
+
+        reg = SightseeingRegistration.objects.create(
+            user=booking.user,
+            booking=booking,
+            guests=guests,
+            participants=participants,
+            pay_at_venue=True,
+            status="CONFIRMED",
+        )
+        # clear pending marker
+        booking.sightseeing_opt_in_pending = False
+        booking.save(update_fields=["sightseeing_opt_in_pending"])
+
+        _dbg("SIGHTSEEING:FINALIZED", booking_id=booking.id, reg_id=reg.id, guests=guests)
+    except Exception as ex:
+        _dbg("SIGHTSEEING:FINALIZE_ERR", booking_id=getattr(booking, "id", None), err=str(ex))
 
 
 # -----------------------------------
@@ -94,6 +170,49 @@ def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
     if not names:
         return []
     return list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
+
+# ---- Convenience fee helpers / config ----
+def _calc_convenience_fee(base_inr: float, rate: float, gst: float = 0.18) -> int:
+    """
+    Gross-up so that after gateway deducts (rate + GST on fee),
+    you still net 'base_inr'. Returns fee in INR (rounded).
+    """
+    if rate <= 0:
+        return 0
+    gross = base_inr / (1 - rate * (1 + gst))
+    return int(round(gross - base_inr))
+
+# Defaults; override in settings.py if needed
+RAZORPAY_PLATFORM_FEE_RATE = getattr(settings, "RAZORPAY_PLATFORM_FEE_RATE", 0.02)  # 2% typical
+RAZORPAY_PLATFORM_FEE_GST  = getattr(settings, "RAZORPAY_PLATFORM_FEE_GST", 0.18)   # 18% GST on fee
+RAZORPAY_UPI_FEE_RATE      = getattr(settings, "RAZORPAY_UPI_FEE_RATE", 0.02)       # UPI MDR = 0%
+
+def _conv_fee_breakdown(base_inr: int, rate: float, gst: float):
+    """
+    Return a detailed convenience fee split so it can be shown in breakdown:
+      - fee_inr            : total convenience fee (platform fee + GST on it)
+      - platform_fee_inr   : the gateway MDR itself
+      - platform_gst_inr   : GST charged on the platform fee
+      - gross_total_inr    : base + fee
+    """
+    if rate <= 0:
+        return {"rate": rate, "gst_rate": gst,
+                "fee_inr": 0, "platform_fee_inr": 0, "platform_gst_inr": 0,
+                "gross_total_inr": int(base_inr)}
+    # gross-up so net is base_inr after MDR+GST
+    gross = int(round(base_inr / (1 - rate * (1 + gst))))
+    platform_fee = int(round(gross * rate))
+    platform_gst = int(round(platform_fee * gst))
+    fee_total = platform_fee + platform_gst
+    return {
+        "rate": rate,
+        "gst_rate": gst,
+        "platform_fee_inr": platform_fee,
+        "platform_gst_inr": platform_gst,
+        "fee_inr": fee_total,
+        "gross_total_inr": gross,
+    }
+
 
 def _candidate_units_for_package(event: Event, pkg: Package, *, category: str | None,
                                  booking: Booking | None = None, lock: bool = False):
@@ -136,6 +255,7 @@ def _has_capacity_for_package(event: Event, pkg: Package, needed: int, category:
         if cap >= max(1, needed):
             return True
     return False
+
 
 
 # -----------------------------------
@@ -259,6 +379,138 @@ def _get_razorpay_client():
 # -----------------------------------
 # Package ↔ UnitType mapping (room/swiss/tent)
 # -----------------------------------
+
+
+
+def _sanitize_gender(s):
+    """
+    Normalize to 'M', 'F', or 'O' (other/unknown).
+    Accepts common variants; unknown -> 'O'.
+    """
+    if s is None:
+        return 'O'
+    v = str(s).strip().lower()
+    if v in ('m', 'male', 'man', 'men'):
+        return 'M'
+    if v in ('f', 'female', 'woman', 'women'):
+        return 'F'
+    # non-binary / others / unknown collapse to 'O'
+    if v in ('o', 'other', 'others', 'nb', 'nonbinary', 'non-binary', 'x'):
+        return 'O'
+    return 'O'
+
+
+def _party_gender_counts(booking) -> dict[str, int]:
+    """
+    Derive M/F/O counts for this booking (primary + companions).
+    If primary_gender missing, treat as 'O'.
+    Companion dicts may include 'gender'.
+    """
+    counts = Counter()
+    primary = getattr(booking, 'primary_gender', None) or 'O'
+    counts[_sanitize_gender(primary)] += 1
+
+    comps = getattr(booking, 'companions', None) or []
+    if isinstance(comps, list):
+        for c in comps:
+            g = _sanitize_gender((c or {}).get('gender'))
+            counts[g] += 1
+
+    # Only return M/F/O keys for clarity
+    return {'M': counts.get('M', 0), 'F': counts.get('F', 0), 'O': counts.get('O', 0)}
+
+
+def _assign_units_by_gender(units: list, gender_counts: dict[str, int]):
+    """
+    Greedy packer for split scenario:
+      - units: list[Unit] sorted by -capacity
+      - gender_counts: {'M': int, 'F': int, 'O': int}
+    Returns (picked_units_list or None).
+    Strategy:
+      1) Work largest gender first to reduce fragmentation.
+      2) For each gender, consume largest remaining units until its count is covered.
+      3) If any gender can’t be covered -> fail (return None).
+    """
+    # quick exit if there is a single unit that can host everyone
+    total_people = sum(gender_counts.values())
+    for u in units:
+        if (u.capacity or 1) >= total_people:
+            return [u]  # single-unit case: ignore gender
+
+    # Filter genders that have >0
+    genders = [(g, n) for g, n in gender_counts.items() if n > 0]
+    if not genders:
+        return []
+
+    # Sort genders by need (desc), then units by capacity (desc)
+    genders.sort(key=lambda x: x[1], reverse=True)
+    pool = list(units)  # copy
+    assigned = []       # selected Units (no need to track which gender took which, for now)
+
+    for g, need in genders:
+        remaining = need
+        idx = 0
+        # always consume biggest first
+        while remaining > 0 and idx < len(pool):
+            u = pool[idx]
+            assigned.append(u)
+            remaining -= (u.capacity or 1)
+            # remove the consumed unit from pool
+            pool.pop(idx)
+            # do not increment idx, because we popped current
+        if remaining > 0:
+            # not enough capacity for this gender within available units
+            return None
+
+    # Success: 'assigned' is the set of units that covers all genders with per-unit single-gender use.
+    return assigned
+
+
+# views.py (helpers section)
+
+def _sanitize_meal(s: str | None) -> str:
+    """
+    Normalize meal strings to: VEG | NON_VEG | VEGAN | JAIN | OTHER
+    Accepts common variants like 'veg', 'non-veg', 'non veg', 'egg', etc.
+    """
+    val = (s or "").strip().upper()
+    val = val.replace("-", "").replace(" ", "")
+    if val in {"VEG", "VEGETARIAN", "V"}:
+        return "VEG"
+    if val in {"NONVEG", "NONVEGETARIAN", "NV", "N", "EGG", "EGGETARIAN", "CHICKEN", "MEAT"}:
+        return "NON_VEG"
+    if val in {"VEGAN", "VG"}:
+        return "VEGAN"
+    if val == "JAIN":
+        return "JAIN"
+    return "OTHER"
+
+def _normalize_companions(raw_list):
+    """Return a clean list of companions (excluding primary)."""
+    out = []
+    if not isinstance(raw_list, list):
+        return out
+    for p in raw_list:
+        if not isinstance(p, dict):
+            continue
+        name = _sanitize_name(p.get("name"))
+        age = _sanitize_age(p.get("age"))
+        bg = _sanitize_bg(p.get("blood_group"))
+        gender = _sanitize_gender(p.get("gender"))  # you already added this
+        meal = _sanitize_meal(p.get("meal") or p.get("meal_preference"))
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "age": age,
+            "blood_group": bg,
+            "gender": gender,
+            "meal": meal,  # NEW
+        })
+    return out
+
+
+
 # Default mapping (used if Package.allowed_unit_types M2M is not defined or empty):
 #   room  -> COTTAGE, HUT
 #   swiss -> SWISS TENT
@@ -537,6 +789,7 @@ def _compute_booking_pricing(package: Package, booking: Booking):
 # Payments
 # -----------------------------------
 
+## version 3: refactored create_order with helper function
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -546,7 +799,9 @@ def create_order(request):
     Body:
     {
       "package_id": 1,
-      "booking_id": 123,     # optional but recommended
+      "booking_id": 123,          # optional but recommended
+      "pass_platform_fee": true,  # optional; default true (adds convenience fee)
+      "assume_method": "card"     # optional: "card"|"netbanking"|"upi"; selects fee rate
     }
     """
     package_id = request.data.get("package_id")
@@ -560,11 +815,13 @@ def create_order(request):
     except Package.DoesNotExist:
         return Response({"error": "invalid package"}, status=404)
 
-    # Default: single person base price
+    # ---- Compute base server-side amount ----
     total_inr = int(package.price_inr)
 
-    # If booking provided, compute pricing from server-side rules
     booking = None
+    breakdown = None
+    guests_total = None
+
     if booking_id:
         try:
             booking = Booking.objects.get(id=booking_id, user=request.user)
@@ -577,31 +834,56 @@ def create_order(request):
         except ValueError as ve:
             return Response({"error": str(ve)}, status=400)
 
+        # Compute full booking price (base + extras) and snapshot it
         total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
-        # snapshot onto booking
         booking.pricing_total_inr = total_inr
         booking.pricing_breakdown = breakdown
         booking.guests = guests_total
         booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
 
-    amount_paise = int(total_inr) * 100
+    # ---- Convenience fee (detailed split) ------------------------------
+    # default ON
+    pass_platform_fee = request.data.get("pass_platform_fee")
+    if pass_platform_fee is None:
+        pass_platform_fee = True
+    # normalize to bool if someone sends "true"/"1"
+    if isinstance(pass_platform_fee, str):
+        pass_platform_fee = pass_platform_fee.strip().lower() in ("1","true","yes","y")
 
+    assume_method = (request.data.get("assume_method") or "").strip().lower()
+    rate = RAZORPAY_UPI_FEE_RATE if assume_method == "upi" else RAZORPAY_PLATFORM_FEE_RATE
+
+    conv = _conv_fee_breakdown(total_inr, rate, RAZORPAY_PLATFORM_FEE_GST) if pass_platform_fee else None
+    conv_fee_inr = int(conv["fee_inr"]) if conv else 0
+    gross_inr = int(conv["gross_total_inr"]) if conv else int(total_inr)
+    amount_paise = int(gross_inr) * 100
+
+    # ---- Razorpay client ----------------------------------------------
     try:
         client = _get_razorpay_client()
     except RuntimeError as e:
         return Response({"error": str(e)}, status=503)
 
-    # (A) Create Razorpay order
+    # (A) Create Razorpay order (charge the GROSS amount)
     try:
         rp_order = client.order.create({
             "amount": amount_paise,
             "currency": "INR",
             "payment_capture": 1,
-            "notes": {"package": package.name, "booking_id": booking_id or ""},
+            "notes": {
+                "package": package.name,
+                "booking_id": booking_id or "",
+                "base_amount_inr": str(total_inr),
+                "convenience_fee_inr": str(conv_fee_inr),
+                "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
+                "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
+                "assume_method": assume_method or "auto",
+            },
         })
     except Exception as e:
         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
 
+    # Persist local Order with GROSS amount (customer pays this)
     o = Order.objects.create(
         user=request.user,
         package=package,
@@ -610,7 +892,7 @@ def create_order(request):
         currency="INR",
     )
 
-    # (B) Create a Payment Link
+    # (B) Payment Link (hosted checkout)
     payment_link_url = None
     pl_meta = {}
     try:
@@ -621,24 +903,29 @@ def create_order(request):
         cust = {k: v for k, v in cust.items() if v}
 
         pl_req = {
-            "amount": amount_paise,
+            "amount": amount_paise,               # charge gross amount
             "currency": "INR",
             "reference_id": f"orderdb-{o.id}",
             "description": f"H2H: {package.name}",
-            "customer": cust or None,
             "notify": {"email": True, "sms": False},
             "notes": {
                 "package": package.name,
                 "local_rp_order": rp_order["id"],
                 "booking_id": str(booking_id or ""),
+                "base_amount_inr": str(total_inr),
+                "convenience_fee_inr": str(conv_fee_inr),
+                "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
+                "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
+                "assume_method": assume_method or "auto",
             },
         }
-        if pl_req.get("customer") is None:
-            pl_req.pop("customer")
+        if cust:
+            pl_req["customer"] = cust
 
         pl = client.payment_link.create(pl_req)
         payment_link_url = pl.get("short_url")
         if pl.get("order_id"):
+            # Sync to PL-generated order id (common with Payment Links)
             o.razorpay_order_id = pl["order_id"]
             o.save(update_fields=["razorpay_order_id"])
             rp_order["id"] = pl["order_id"]
@@ -646,11 +933,25 @@ def create_order(request):
     except Exception as e:
         pl_meta = {"error": str(e)}
 
-    # If we created order successfully and had a booking, link them
+    # ---- Link booking + persist detailed convenience breakdown ---------
     if booking:
         booking.order = o
-        booking.save(update_fields=["order"])
+        try:
+            bd = dict(booking.pricing_breakdown or {})
+            if conv:
+                bd["convenience"] = {
+                    "method": assume_method or "auto",
+                    **conv,  # rate, gst_rate, platform_fee_inr, platform_gst_inr, fee_inr, gross_total_inr
+                }
+                booking.pricing_breakdown = bd
+                booking.pricing_total_inr = gross_inr
+                booking.save(update_fields=["order", "pricing_breakdown", "pricing_total_inr"])
+            else:
+                booking.save(update_fields=["order"])
+        except Exception:
+            booking.save(update_fields=["order"])
 
+    # ---- Response ------------------------------------------------------
     return Response({
         "order": rp_order,
         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
@@ -658,6 +959,11 @@ def create_order(request):
         "payment_link": payment_link_url,
         "payment_link_meta": pl_meta,
         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else None,
+        "base_amount_inr": int(total_inr),
+        "convenience_fee_inr": int(conv_fee_inr),
+        "gross_amount_inr": int(gross_inr),
+        # Optional: echo the detailed split so FE can show it without re-reading the booking
+        "convenience": ({"method": assume_method or "auto", **conv} if conv else None),
     })
 
 
@@ -674,8 +980,6 @@ def _units_taken_for_event(event: Event):
         booking__status__in=["PENDING_PAYMENT", "CONFIRMED"],
     )
     return Unit.objects.annotate(is_taken=Exists(taken)).filter(is_taken=True)
-
-
 
 @transaction.atomic
 def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
@@ -724,7 +1028,7 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
     taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
     qs = (Unit.objects
           .select_for_update()
-          .filter(unit_type_id__in=( [pinned_ut] if pinned_ut else allowed_ids ),
+          .filter(unit_type_id__in=([pinned_ut] if pinned_ut else allowed_ids),
                   status="AVAILABLE")
           .exclude(id__in=taken_ids))
 
@@ -743,16 +1047,32 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
     else:
         qs = qs.order_by("-capacity", "property__name", "unit_type__name", "label")
 
+    # >>> FIX: always build the pool, regardless of the branch above
     pool = list(qs)
+
     if not pool:
         raise ValueError("Insufficient capacity for requested guests")
 
-    # --- try to fit within a single (property, unit_type) cluster ---
+    # --- gender counts for this booking (NOT relying on primary alone) ---
+    gender_counts = _party_gender_counts(booking)
+    total_needed = needed
+
+    _dbg("ALLOC:GENDER_COUNTS", M=gender_counts['M'], F=gender_counts['F'], O=gender_counts['O'], total_needed=total_needed)
+
+    # --- group units by (property, unit_type) for cluster-first attempt ---
     clusters = defaultdict(list)
     for u in pool:
         clusters[(u.property_id, u.unit_type_id)].append(u)
 
-    # Cluster preference: if booking.property is set, prefer that; if pinned_ut, prefer that ut
+    def sort_units_desc(units):
+        return sorted(
+            units,
+            key=lambda x: (-(x.capacity or 1),
+                           getattr(x.property, "name", ""),
+                           getattr(x.unit_type, "name", ""),
+                           x.label)
+        )
+
     def cluster_score(key):
         prop_id, ut_id = key
         score = 0
@@ -763,35 +1083,51 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
         return score
 
     picks: list[Unit] = []
+
+    # --- Try single-cluster fit (prefer same property / pinned unit_type) ---
     for (prop_id, ut_id), units in sorted(clusters.items(), key=lambda kv: cluster_score(kv[0])):
-        total = 0
-        trial = []
-        for u in units:
-            trial.append(u)
-            total += (u.capacity or 1)
-            if total >= needed:
-                picks = trial
-                # force booking slice if not set (or if pinned_ut forced a unit_type)
-                booking.property_id = prop_id
-                booking.unit_type_id = ut_id
-                break
-        if picks:
+        units_sorted = sort_units_desc(units)
+
+        # Fast path: any single unit can host everyone -> ignore gender entirely
+        single = next((u for u in units_sorted if (u.capacity or 1) >= total_needed), None)
+        if single:
+            picks = [single]
+            booking.property_id = prop_id
+            booking.unit_type_id = ut_id
+            _dbg("ALLOC:CHOICE", mode="single_unit_cluster", property_id=prop_id, unit_type_id=ut_id, unit_id=single.id)
             break
 
-    # --- fallback: cross-cluster, minimize number of units ---
+        # Split path: pack by gender in this cluster
+        assigned = _assign_units_by_gender(units_sorted, gender_counts)
+        if assigned and sum((u.capacity or 1) for u in assigned) >= total_needed:
+            picks = assigned
+            booking.property_id = prop_id
+            booking.unit_type_id = ut_id
+            _dbg("ALLOC:CHOICE", mode="split_cluster_gendered", property_id=prop_id, unit_type_id=ut_id,
+                 unit_ids=[u.id for u in assigned])
+            break
+
+    # --- Fallback: cross-cluster (global pool) ---
     if not picks:
-        total = 0
-        for u in pool:
-            picks.append(u)
-            total += (u.capacity or 1)
-            if total >= needed:
-                # set booking slice from first picked unit
+        pool_sorted = sort_units_desc(pool)
+
+        # Global single-unit fit?
+        single = next((u for u in pool_sorted if (u.capacity or 1) >= total_needed), None)
+        if single:
+            picks = [single]
+            booking.property = single.property
+            booking.unit_type = single.unit_type
+            _dbg("ALLOC:CHOICE", mode="single_unit_global", unit_id=single.id)
+        else:
+            assigned = _assign_units_by_gender(pool_sorted, gender_counts)
+            if assigned and sum((u.capacity or 1) for u in assigned) >= total_needed:
+                picks = assigned
                 booking.property = picks[0].property
                 booking.unit_type = picks[0].unit_type
-                break
+                _dbg("ALLOC:CHOICE", mode="split_global_gendered", unit_ids=[u.id for u in assigned])
 
-    if sum((u.capacity or 1) for u in picks) < needed:
-        raise ValueError("Insufficient capacity for requested guests")
+    if not picks or sum((u.capacity or 1) for u in picks) < total_needed:
+        raise ValueError("Insufficient capacity respecting gender separation")
 
     # --- persist allocations, mark units, auto-fill category, status, dates ---
     for u in picks:
@@ -808,7 +1144,6 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
 
     booking.save(update_fields=["property", "unit_type", "category", "status", "check_in", "check_out"])
     return picks
-
 
 # -----------------------------------
 # Inventory / Booking endpoints (EVENT-BASED)
@@ -1042,6 +1377,66 @@ def _apply_promocode(total_inr: int, promo: PromoCode | None) -> tuple[int, int,
 
 
 # ---------- PUBLIC: Validate promocode (ADD) ----------
+# @api_view(["GET"])
+# @permission_classes([AllowAny])
+# def validate_promocode(request):
+#     """
+#     GET params:
+#       code=H2H10
+#       amount_inr=5000             # optional base to preview (if not provided, tries booking_id or package_id)
+#       booking_id=123              # optional; uses computed booking price
+#       package_id=1                # optional; falls back to package base price
+#     """
+#     code = (request.GET.get("code") or "").strip()
+#     if not code:
+#         return Response({"valid": False, "reason": "code_required"}, status=400)
+
+#     promo = _get_live_promocode(code)
+#     if not promo:
+#         return Response({"valid": False, "reason": "invalid_or_expired"}, status=200)
+
+#     # Determine a base amount to preview discount
+#     amount = request.GET.get("amount_inr")
+#     base_inr = None
+
+#     if amount is not None:
+#         try:
+#             base_inr = max(1, int(float(amount)))
+#         except Exception:
+#             return Response({"valid": False, "reason": "bad_amount"}, status=400)
+
+#     elif request.GET.get("booking_id"):
+#         try:
+#             booking = Booking.objects.get(id=int(request.GET["booking_id"]))
+#             # choose a package context if the booking is linked to an order else use any active package?
+#             # We'll use the order's package if present, else require package_id param.
+#             pkg = booking.order.package if booking.order_id else None
+#             if not pkg and request.GET.get("package_id"):
+#                 pkg = Package.objects.get(id=int(request.GET["package_id"]), active=True)
+#             if not pkg:
+#                 return Response({"valid": False, "reason": "package_required"}, status=400)
+#             # reuse your pricing rules
+#             base_inr, _, _ = _compute_booking_pricing(pkg, booking)
+#         except Exception:
+#             return Response({"valid": False, "reason": "bad_booking_or_package"}, status=400)
+
+#     elif request.GET.get("package_id"):
+#         try:
+#             pkg = Package.objects.get(id=int(request.GET["package_id"]), active=True)
+#             base_inr = int(pkg.price_inr)
+#             if pkg and getattr(pkg, "promo_active", True) is False:
+#                 return Response({"valid": False, "reason": "promo_disabled_for_package"}, status=200)
+#         except Exception:
+#             return Response({"valid": False, "reason": "bad_package"}, status=400)
+
+#     else:
+#         return Response({"valid": True, "promo": {"code": promo.code, "kind": promo.kind, "value": promo.value}},
+#                         status=200)
+
+#     discount, final, br = _apply_promocode(base_inr, promo)
+#     return Response({"valid": True, "base_inr": base_inr, "discount_inr": discount, "final_inr": final, "promo": br})
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def validate_promocode(request):
@@ -1073,14 +1468,18 @@ def validate_promocode(request):
     elif request.GET.get("booking_id"):
         try:
             booking = Booking.objects.get(id=int(request.GET["booking_id"]))
-            # choose a package context if the booking is linked to an order else use any active package?
-            # We'll use the order's package if present, else require package_id param.
+            # Prefer the order's package; else allow an explicit package override
             pkg = booking.order.package if booking.order_id else None
             if not pkg and request.GET.get("package_id"):
                 pkg = Package.objects.get(id=int(request.GET["package_id"]), active=True)
             if not pkg:
                 return Response({"valid": False, "reason": "package_required"}, status=400)
-            # reuse your pricing rules
+
+            # 👉 enforce per-package promo toggle here too
+            if getattr(pkg, "promo_active", True) is False:
+                return Response({"valid": False, "reason": "promo_disabled_for_package"}, status=200)
+
+            # server-side pricing rules
             base_inr, _, _ = _compute_booking_pricing(pkg, booking)
         except Exception:
             return Response({"valid": False, "reason": "bad_booking_or_package"}, status=400)
@@ -1088,11 +1487,17 @@ def validate_promocode(request):
     elif request.GET.get("package_id"):
         try:
             pkg = Package.objects.get(id=int(request.GET["package_id"]), active=True)
+
+            # 👉 enforce per-package promo toggle when package_id is used
+            if getattr(pkg, "promo_active", True) is False:
+                return Response({"valid": False, "reason": "promo_disabled_for_package"}, status=200)
+
             base_inr = int(pkg.price_inr)
         except Exception:
             return Response({"valid": False, "reason": "bad_package"}, status=400)
 
     else:
+        # No amount/package/booking: just echo promo meta
         return Response({"valid": True, "promo": {"code": promo.code, "kind": promo.kind, "value": promo.value}},
                         status=200)
 
@@ -1115,21 +1520,6 @@ def _sanitize_age(a):
     except Exception:
         return None
 
-def _normalize_companions(raw_list):
-    """Return a clean list of companions (excluding primary)."""
-    out = []
-    if not isinstance(raw_list, list):
-        return out
-    for p in raw_list:
-        if not isinstance(p, dict):
-            continue
-        name = _sanitize_name(p.get("name"))
-        age = _sanitize_age(p.get("age"))
-        bg = _sanitize_bg(p.get("blood_group"))
-        if not name:
-            continue
-        out.append({"name": name, "age": age, "blood_group": bg})
-    return out
 
 def _extras_from_people(package: Package, total_people: int, ages_for_everyone: list[int]):
     """
@@ -1181,15 +1571,36 @@ def _extras_from_people(package: Package, total_people: int, ages_for_everyone: 
     return extra_adults, extra_half, extra_free, extra_ages
 
 
-def _dbg(msg, **kw):
-    """Compact JSON log; avoid duplicate console prints."""
+# def _dbg(msg, **kw):
+#     """Compact JSON log; avoid duplicate console prints."""
+#     try:
+#         payload = json.dumps(kw, default=str)[:4000]
+#     except Exception:
+#         payload = str(kw)
+#     logger.warning("[create_booking] %s | %s", msg, payload)
+
+
+def _dbg(*args, **kwargs):
+    """
+    Flexible debug logger:
+      - _dbg("TAG", key=val, ...)
+      - _dbg(key=val, ...)
+      - _dbg()  -> no-op
+    Never raises.
+    """
     try:
-        payload = json.dumps(kw, default=str)[:4000]
+        tag = args[0] if args else kwargs.pop("tag", None)
+        payload = {"tag": tag} if tag is not None else {}
+        payload.update(kwargs)
+        # Log to std logger at DEBUG level
+        try:
+            log.debug(json.dumps(payload, default=str))
+        except Exception:
+            # Fallback to print if JSON fails
+            print("[DBG]", tag, kwargs)
     except Exception:
-        payload = str(kw)
-    logger.warning("[create_booking] %s | %s", msg, payload)
-
-
+        # Absolute last-resort no-op
+        pass
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -1199,18 +1610,7 @@ def create_booking(request):
     We only need: event_id, package_id (or order_id), optional companions/category/etc.
     Concrete property/unit_type/units are auto-chosen after payment by the allocator.
     """
-    # --- request surface ---
-    _dbg(
-        "ENTRY",
-        method=request.method,
-        path=getattr(request, "get_full_path", lambda: "")(),
-        is_auth=getattr(request.user, "is_authenticated", False),
-        user_id=getattr(request.user, "id", None),
-        sessionid_present=bool(request.COOKIES.get("sessionid")),
-        csrf_cookie=request.COOKIES.get("csrftoken"),
-        csrf_header=request.META.get("HTTP_X_CSRFTOKEN"),
-        content_type=request.META.get("CONTENT_TYPE"),
-    )
+    _dbg("ENTRY", ...)
 
     data = request.data
     _dbg("RAW_PAYLOAD_KEYS", keys=list(data.keys()))
@@ -1222,7 +1622,7 @@ def create_booking(request):
         _dbg("BAD_event_id", got=data.get("event_id"))
         return Response({"error": "invalid_event_id", "detail": "event_id must be an integer"}, status=400)
 
-    # ---- model lookups (with precise error) ----
+    # ---- model lookups ----
     try:
         event = Event.objects.get(id=event_id, active=True, booking_open=True)
     except Event.DoesNotExist:
@@ -1231,10 +1631,11 @@ def create_booking(request):
 
     # ---- basic fields ----
     category = (data.get("category") or "").strip().upper()
-    _dbg("CATEGORY_RESOLVED", category=category)
-
-    # companions + guests normalization
     companions = _normalize_companions(data.get("companions") or [])
+    primary_gender = _sanitize_gender(data.get("primary_gender"))
+    primary_age = _sanitize_age(data.get("primary_age"))
+    primary_meal = _sanitize_meal(data.get("primary_meal") or data.get("primary_meal_preference"))  # NEW
+
     guests_total = int(data.get("guests") or (1 + len(companions)))
     if guests_total != (1 + len(companions)):
         _dbg("GUESTS_ADJUSTED", before=guests_total, companions_len=len(companions))
@@ -1243,14 +1644,10 @@ def create_booking(request):
     blood_group = _sanitize_bg(data.get("blood_group"))
     emer_name = _sanitize_name(data.get("emergency_contact_name"))
     emer_phone = (data.get("emergency_contact_phone") or "").strip()[:32]
-    _dbg(
-        "PRIMARY_INFO",
-        blood_group=blood_group,
-        emer_name=emer_name,
-        emer_phone=emer_phone,
-        guests_total=guests_total,
-        companions_len=len(companions),
-    )
+    _dbg("PRIMARY_INFO",
+         blood_group=blood_group, emer_name=emer_name, emer_phone=emer_phone,
+         guests_total=guests_total, companions_len=len(companions),
+         primary_gender=primary_gender,primary_age=primary_age, primary_meal=primary_meal)
 
     # ---- package / order selection ----
     package = None
@@ -1277,7 +1674,7 @@ def create_booking(request):
             return Response({"error": "invalid_package_id", "package_id": package_id}, status=400)
 
     # ---- derive extras from ages (primary + companions) ----
-    ages_everyone = [_sanitize_age(data.get("primary_age"))]  # may be None (treated as adult)
+    ages_everyone = [_sanitize_age(data.get("primary_age"))]
     ages_everyone.extend([c.get("age") for c in companions])
     try:
         extra_adults, extra_half, extra_free, extra_ages_only = _extras_from_people(
@@ -1286,13 +1683,9 @@ def create_booking(request):
     except Exception as ex:
         _dbg("EXTRAS_COMPUTE_FAILED", err=str(ex), ages=ages_everyone, guests_total=guests_total)
         return Response({"error": "extras_compute_failed", "detail": str(ex)}, status=400)
-    _dbg(
-        "EXTRAS_COMPUTED",
-        extra_adults=extra_adults,
-        extra_half=extra_half,
-        extra_free=extra_free,
-        ages_everyone=ages_everyone,
-    )
+    _dbg("EXTRAS_COMPUTED",
+         extra_adults=extra_adults, extra_half=extra_half, extra_free=extra_free,
+         ages_everyone=ages_everyone)
 
     # ---- promo (optional) ----
     promo = None
@@ -1304,16 +1697,16 @@ def create_booking(request):
             return Response({"error": "invalid_or_expired_promocode"}, status=400)
         _dbg("PROMO_OK", code=getattr(promo, "code", None))
 
-    # ---- create booking (NO property/unit_type at this stage) ----
+    # ---- create booking ----
     try:
         booking = Booking.objects.create(
             user=request.user,
             event=event,
-            property=None,               # auto-pick later
-            unit_type=None,              # auto-pick later
+            property=None,
+            unit_type=None,
             category=category,
             guests=max(1, guests_total),
-            companions=companions,
+            companions=companions,            # contains per-person gender & meal now
             status="PENDING_PAYMENT",
             order=order if order else None,
             check_in=event.start_date,
@@ -1321,11 +1714,14 @@ def create_booking(request):
             blood_group=blood_group,
             emergency_contact_name=emer_name,
             emergency_contact_phone=emer_phone,
-            guest_ages=extra_ages_only,  # extras-only ages snapshot
+            guest_ages=extra_ages_only,
             extra_adults=extra_adults,
             extra_children_half=extra_half,
             extra_children_free=extra_free,
             promo_code=promo,
+            primary_gender=primary_gender,
+            primary_age=primary_age,                     # NEW
+            primary_meal_preference=primary_meal,   # NEW
         )
     except Exception as ex:
         _dbg("BOOKING_CREATE_FAILED", err=str(ex))
@@ -1333,845 +1729,6 @@ def create_booking(request):
 
     _dbg("BOOKING_CREATED", booking_id=booking.id)
     return Response(BookingSerializer(booking).data, status=201)
-
-
-
-
-# @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
-# def create_order(request):
-#     """
-#     Body:
-#     {
-#       "package_id": 1,
-#       "booking_id": 123,
-#       "promo_code": "H2H10",
-#       "debug": true
-#     }
-
-#     Capacity precheck ignores Booking.category. Only unit_type (from Package) matters.
-#     """
-#     debug_mode = str(request.data.get("debug") or "").lower() in ("1", "true", "yes", "y")
-#     package_id = request.data.get("package_id")
-#     booking_id = request.data.get("booking_id")
-#     req_promo_code = (request.data.get("promo_code") or "").strip() or None
-
-#     _dbg("CREATE_ORDER:ENTRY",
-#          path=getattr(request, "get_full_path", lambda: "")(),
-#          user_id=getattr(request.user, "id", None),
-#          package_id=package_id,
-#          booking_id=booking_id,
-#          req_promo_code=req_promo_code,
-#          debug_mode=debug_mode)
-
-#     if not package_id:
-#         _dbg("CREATE_ORDER:ERR_NO_PACKAGE_ID")
-#         return Response({"error": "package_id required"}, status=400)
-
-#     try:
-#         package = Package.objects.get(id=package_id, active=True)
-#         _dbg("CREATE_ORDER:PACKAGE_OK", package_id=package.id, package_name=package.name)
-#     except Package.DoesNotExist:
-#         _dbg("CREATE_ORDER:ERR_BAD_PACKAGE", package_id=package_id)
-#         return Response({"error": "invalid package"}, status=404)
-
-#     total_inr = int(package.price_inr)
-#     booking = None
-#     breakdown = None
-#     guests_total = None
-
-#     if booking_id:
-#         try:
-#             booking = Booking.objects.get(id=booking_id, user=request.user)
-#             _dbg("CREATE_ORDER:BOOKING_OK",
-#                  booking_id=booking.id,
-#                  event_id=booking.event_id,
-#                  guests=booking.guests,
-#                  category=(booking.category or "").strip().upper())
-#         except Booking.DoesNotExist:
-#             _dbg("CREATE_ORDER:ERR_BAD_BOOKING", booking_id=booking_id)
-#             return Response({"error": "invalid booking_id"}, status=400)
-
-#         try:
-#             total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
-#             _dbg("CREATE_ORDER:PRICING_OK",
-#                  total_inr=total_inr,
-#                  guests_total=guests_total,
-#                  computed_from=(breakdown or {}).get("computed_from"))
-#         except Exception as ex:
-#             _dbg("CREATE_ORDER:PRICING_ERR", err=str(ex))
-#             return Response({"error": "pricing_failed", "detail": str(ex)}, status=400)
-
-#     # ---- capacity precheck (ignore category) ----
-#     if booking and booking.event_id:
-#         def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
-#             try:
-#                 m2m_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
-#             except Exception:
-#                 m2m_ids = []
-#             if m2m_ids:
-#                 return m2m_ids
-#             names = _allowed_unit_types_for_package(pkg) or set()
-#             if not names:
-#                 return []
-#             ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
-#             if not ids:
-#                 ids = [ut.id for nm in names
-#                        for ut in [UnitType.objects.filter(name__iexact=nm).first()]
-#                        if ut]
-#             return ids
-
-#         allowed_ids = _allowed_utype_ids_for_package(package)
-#         _dbg("CREATE_ORDER:ALLOWED_UNIT_TYPES",
-#              source="M2M" if list(package.allowed_unit_types.all()) else "FALLBACK",
-#              allowed_ids=allowed_ids,
-#              allowed_names=list(UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)))
-
-#         if not allowed_ids:
-#             return Response({
-#                 "error": "package_has_no_allowed_unit_types",
-#                 "message": "Configure allowed unit types on the package or ensure fallback map matches UnitType names."
-#             }, status=400)
-
-#         taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
-
-#         # IGNORE category here:
-#         qs_free = (Unit.objects
-#                    .filter(unit_type_id__in=allowed_ids, status="AVAILABLE")
-#                    .exclude(id__in=taken_ids)
-#                    .order_by("-capacity"))
-
-#         pool_count = qs_free.count()
-#         needed = max(1, int(booking.guests or 1))
-#         cap = 0
-#         sample = []
-#         for u in qs_free.iterator(chunk_size=500):
-#             if len(sample) < 10:
-#                 sample.append({
-#                     "id": u.id,
-#                     "label": u.label,
-#                     "property": getattr(u.property, "name", ""),
-#                     "unit_type": getattr(u.unit_type, "name", ""),
-#                     "category": u.category,
-#                     "capacity": u.capacity or 1,
-#                 })
-#             cap += (u.capacity or 1)
-#             if cap >= needed:
-#                 break
-
-#         _dbg("CREATE_ORDER:CAPACITY_CHECK_IGNORE_CATEGORY",
-#              needed=needed, cap_seen=cap, pool_count=pool_count,
-#              taken_ids_count=len(taken_ids), sample_units=sample)
-
-#         if cap < needed:
-#             return Response({
-#                 "error": "house_full",
-#                 "message": "No capacity left for this package for the event (category ignored).",
-#                 "debug": {
-#                     "event_id": booking.event_id,
-#                     "package_id": package.id,
-#                     "needed": needed,
-#                     "allowed_unit_type_names": list(
-#                         UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)
-#                     ),
-#                     "pool_units": pool_count,
-#                     "capacity_available": cap,
-#                     "units_sample": sample
-#                 }
-#             }, status=409)
-
-#     # ---- promo ----
-#     promo = booking.promo_code if (booking and booking.promo_code_id) else _get_live_promocode(req_promo_code)
-#     _dbg("CREATE_ORDER:PROMO",
-#          source="booking" if (booking and booking.promo_code_id) else "request",
-#          code=(getattr(promo, "code", None) or None))
-
-#     try:
-#         promo_discount, final_inr, promo_br = _apply_promocode(total_inr, promo)
-#         _dbg("CREATE_ORDER:PROMO_APPLIED",
-#              total_before=total_inr, discount=promo_discount, total_after=final_inr)
-#     except Exception as ex:
-#         _dbg("CREATE_ORDER:PROMO_ERR", err=str(ex))
-#         return Response({"error": "promo_apply_failed", "detail": str(ex)}, status=400)
-
-#     if booking:
-#         try:
-#             if promo_br:
-#                 breakdown = breakdown or {}
-#                 breakdown = {**breakdown, "promo": promo_br}
-#             booking.pricing_total_inr = final_inr
-#             booking.pricing_breakdown = breakdown or booking.pricing_breakdown
-#             booking.guests = guests_total if guests_total is not None else booking.guests
-#             booking.promo_discount_inr = promo_discount
-#             booking.promo_breakdown = promo_br
-#             if promo and not booking.promo_code_id:
-#                 booking.promo_code = promo
-#             booking.save(update_fields=[
-#                 "pricing_total_inr", "pricing_breakdown", "guests",
-#                 "promo_discount_inr", "promo_breakdown", "promo_code"
-#             ])
-#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_OK", booking_id=booking.id, final_inr=final_inr)
-#         except Exception as ex:
-#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_ERR", err=str(ex))
-#             return Response({"error": "pricing_snapshot_failed", "detail": str(ex)}, status=400)
-
-#     amount_paise = max(1, int(final_inr)) * 100
-#     try:
-#         client = _get_razorpay_client()
-#     except RuntimeError as e:
-#         _dbg("CREATE_ORDER:RAZORPAY_CLIENT_ERR", err=str(e))
-#         return Response({"error": str(e)}, status=503)
-
-#     try:
-#         rp_order = client.order.create({
-#             "amount": amount_paise,
-#             "currency": "INR",
-#             "payment_capture": 1,
-#             "notes": {
-#                 "package": package.name,
-#                 "booking_id": booking_id or "",
-#                 "promo_code": (promo and promo.code) or ""
-#             },
-#         })
-#         _dbg("CREATE_ORDER:RP_ORDER_OK", rp_order_id=rp_order.get("id"), amount_paise=amount_paise)
-#     except Exception as e:
-#         _dbg("CREATE_ORDER:RP_ORDER_ERR", err=str(e))
-#         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
-
-#     try:
-#         o = Order.objects.create(
-#             user=request.user,
-#             package=package,
-#             razorpay_order_id=rp_order["id"],
-#             amount=amount_paise,
-#             currency="INR",
-#         )
-#         _dbg("CREATE_ORDER:ORDER_DB_OK", order_db_id=o.id, rp_order_id=o.razorpay_order_id)
-#     except Exception as e:
-#         _dbg("CREATE_ORDER:ORDER_DB_ERR", err=str(e))
-#         return Response({"error": "order_db_create_failed", "detail": str(e)}, status=500)
-
-#     payment_link_url = None
-#     pl_meta = {}
-#     try:
-#         cust = {
-#             "name": (request.user.get_full_name() or request.user.username)[:100],
-#             "email": (getattr(request.user, "email", "") or None),
-#         }
-#         cust = {k: v for k, v in cust.items() if v}
-#         pl_req = {
-#             "amount": amount_paise,
-#             "currency": "INR",
-#             "reference_id": f"orderdb-{o.id}",
-#             "description": f"H2H: {package.name}",
-#             "customer": cust or None,
-#             "notify": {"email": True, "sms": False},
-#             "notes": {
-#                 "package": package.name,
-#                 "local_rp_order": rp_order["id"],
-#                 "booking_id": str(booking_id or ""),
-#                 "promo_code": (promo and promo.code) or "",
-#                 "promo_discount_inr": promo_discount,
-#             },
-#         }
-#         if pl_req.get("customer") is None:
-#             pl_req.pop("customer")
-#         pl = client.payment_link.create(pl_req)
-#         payment_link_url = pl.get("short_url")
-#         if pl.get("order_id"):
-#             o.razorpay_order_id = pl["order_id"]
-#             o.save(update_fields=["razorpay_order_id"])
-#             rp_order["id"] = pl["order_id"]
-#         pl_meta = {"payment_link_id": pl.get("id")}
-#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_OK",
-#              payment_link_id=pl_meta.get("payment_link_id"),
-#              payment_link_url=payment_link_url)
-#     except Exception as e:
-#         pl_meta = {"error": str(e)}
-#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_ERR", err=str(e))
-
-#     if booking:
-#         try:
-#             booking.order = o
-#             booking.save(update_fields=["order"])
-#             _dbg("CREATE_ORDER:BOOKING_LINKED_TO_ORDER", booking_id=booking.id, order_db_id=o.id)
-#         except Exception as e:
-#             _dbg("CREATE_ORDER:BOOKING_LINK_ERR", err=str(e))
-
-#     return Response({
-#         "order": rp_order,
-#         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
-#         "order_db": OrderSerializer(o).data,
-#         "payment_link": payment_link_url,
-#         "payment_link_meta": pl_meta,
-#         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else {
-#             "base": {"includes": package.base_includes, "price_inr": int(package.price_inr)},
-#             "promo": promo_br,
-#             "total_inr_before_promo": total_inr,
-#             "total_inr": final_inr,
-#         },
-#     })
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def create_order(request):
-    """
-    Body:
-    {
-      "package_id": 1,
-      "booking_id": 123,
-      "promo_code": "H2H10",
-      "debug": true
-    }
-
-    Capacity precheck ignores Booking.category. Only unit_type (from Package) matters.
-    """
-    debug_mode = str(request.data.get("debug") or "").lower() in ("1", "true", "yes", "y")
-    package_id = request.data.get("package_id")
-    booking_id = request.data.get("booking_id")
-    req_promo_code = (request.data.get("promo_code") or "").strip() or None
-
-    _dbg("CREATE_ORDER:ENTRY",
-         path=getattr(request, "get_full_path", lambda: "")(),
-         user_id=getattr(request.user, "id", None),
-         package_id=package_id,
-         booking_id=booking_id,
-         req_promo_code=req_promo_code,
-         debug_mode=debug_mode)
-
-    if not package_id:
-        _dbg("CREATE_ORDER:ERR_NO_PACKAGE_ID")
-        return Response({"error": "package_id required"}, status=400)
-
-    try:
-        package = Package.objects.get(id=package_id, active=True)
-        _dbg("CREATE_ORDER:PACKAGE_OK", package_id=package.id, package_name=package.name)
-    except Package.DoesNotExist:
-        _dbg("CREATE_ORDER:ERR_BAD_PACKAGE", package_id=package_id)
-        return Response({"error": "invalid package"}, status=404)
-
-    total_inr = int(package.price_inr)
-    booking = None
-    breakdown = None
-    guests_total = None
-
-    if booking_id:
-        try:
-            booking = Booking.objects.get(id=booking_id, user=request.user)
-            _dbg("CREATE_ORDER:BOOKING_OK",
-                 booking_id=booking.id,
-                 event_id=booking.event_id,
-                 guests=booking.guests,
-                 category=(booking.category or "").strip().upper())
-        except Booking.DoesNotExist:
-            _dbg("CREATE_ORDER:ERR_BAD_BOOKING", booking_id=booking_id)
-            return Response({"error": "invalid booking_id"}, status=400)
-
-        try:
-            total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
-            _dbg("CREATE_ORDER:PRICING_OK",
-                 total_inr=total_inr,
-                 guests_total=guests_total,
-                 computed_from=(breakdown or {}).get("computed_from"))
-        except Exception as ex:
-            _dbg("CREATE_ORDER:PRICING_ERR", err=str(ex))
-            return Response({"error": "pricing_failed", "detail": str(ex)}, status=400)
-
-    # ---- capacity precheck (ignore category) ----
-    if booking and booking.event_id:
-        def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
-            try:
-                m2m_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
-            except Exception:
-                m2m_ids = []
-            if m2m_ids:
-                return m2m_ids
-            names = _allowed_unit_types_for_package(pkg) or set()
-            if not names:
-                return []
-            ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
-            if not ids:
-                ids = [ut.id for nm in names
-                       for ut in [UnitType.objects.filter(name__iexact=nm).first()]
-                       if ut]
-            return ids
-
-        allowed_ids = _allowed_utype_ids_for_package(package)
-        _dbg("CREATE_ORDER:ALLOWED_UNIT_TYPES",
-             source="M2M" if list(package.allowed_unit_types.all()) else "FALLBACK",
-             allowed_ids=allowed_ids,
-             allowed_names=list(UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)))
-
-        if not allowed_ids:
-            return Response({
-                "error": "package_has_no_allowed_unit_types",
-                "message": "Configure allowed unit types on the package or ensure fallback map matches UnitType names."
-            }, status=400)
-
-        taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
-
-        qs_free = (Unit.objects
-                   .filter(unit_type_id__in=allowed_ids, status="AVAILABLE")
-                   .exclude(id__in=taken_ids)
-                   .order_by("-capacity"))
-
-        pool_count = qs_free.count()
-        needed = max(1, int(booking.guests or 1))
-        cap = 0
-        sample = []
-        for u in qs_free.iterator(chunk_size=500):
-            if len(sample) < 10:
-                sample.append({
-                    "id": u.id,
-                    "label": u.label,
-                    "property": getattr(u.property, "name", ""),
-                    "unit_type": getattr(u.unit_type, "name", ""),
-                    "category": u.category,
-                    "capacity": u.capacity or 1,
-                })
-            cap += (u.capacity or 1)
-            if cap >= needed:
-                break
-
-        _dbg("CREATE_ORDER:CAPACITY_CHECK_IGNORE_CATEGORY",
-             needed=needed, cap_seen=cap, pool_count=pool_count,
-             taken_ids_count=len(taken_ids), sample_units=sample)
-
-        if cap < needed:
-            return Response({
-                "error": "house_full",
-                "message": "No capacity left for this package for the event (category ignored).",
-                "debug": {
-                    "event_id": booking.event_id,
-                    "package_id": package.id,
-                    "needed": needed,
-                    "allowed_unit_type_names": list(
-                        UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)
-                    ),
-                    "pool_units": pool_count,
-                    "capacity_available": cap,
-                    "units_sample": sample
-                }
-            }, status=409)
-
-    # ---- promo ----
-    promo = booking.promo_code if (booking and booking.promo_code_id) else _get_live_promocode(req_promo_code)
-    _dbg("CREATE_ORDER:PROMO",
-         source="booking" if (booking and booking.promo_code_id) else "request",
-         code=(getattr(promo, "code", None) or None))
-
-    try:
-        promo_discount, final_inr, promo_br = _apply_promocode(total_inr, promo)
-        _dbg("CREATE_ORDER:PROMO_APPLIED",
-             total_before=total_inr, discount=promo_discount, total_after=final_inr)
-    except Exception as ex:
-        _dbg("CREATE_ORDER:PROMO_ERR", err=str(ex))
-        return Response({"error": "promo_apply_failed", "detail": str(ex)}, status=400)
-
-    if booking:
-        try:
-            if promo_br:
-                breakdown = breakdown or {}
-                breakdown = {**breakdown, "promo": promo_br}
-            booking.pricing_total_inr = final_inr
-            booking.pricing_breakdown = breakdown or booking.pricing_breakdown
-            booking.guests = guests_total if guests_total is not None else booking.guests
-            booking.promo_discount_inr = promo_discount
-            booking.promo_breakdown = promo_br
-            if promo and not booking.promo_code_id:
-                booking.promo_code = promo
-            booking.save(update_fields=[
-                "pricing_total_inr", "pricing_breakdown", "guests",
-                "promo_discount_inr", "promo_breakdown", "promo_code"
-            ])
-            _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_OK", booking_id=booking.id, final_inr=final_inr)
-        except Exception as ex:
-            _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_ERR", err=str(ex))
-            return Response({"error": "pricing_snapshot_failed", "detail": str(ex)}, status=400)
-
-    amount_paise = max(1, int(final_inr)) * 100
-    try:
-        client = _get_razorpay_client()
-    except RuntimeError as e:
-        _dbg("CREATE_ORDER:RAZORPAY_CLIENT_ERR", err=str(e))
-        return Response({"error": str(e)}, status=503)
-
-    # ---- Razorpay ORDER (keep this so you can use its id for ticketing) ----
-    try:
-        rp_order = client.order.create({
-            "amount": amount_paise,
-            "currency": "INR",
-            "payment_capture": 1,
-            "notes": {
-                "package": package.name,
-                "booking_id": booking_id or "",
-                "promo_code": (promo and promo.code) or ""
-            },
-        })
-        _dbg("CREATE_ORDER:RP_ORDER_OK", rp_order_id=rp_order.get("id"), amount_paise=amount_paise)
-    except Exception as e:
-        _dbg("CREATE_ORDER:RP_ORDER_ERR", err=str(e))
-        return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
-
-    # ---- Local ORDER row ----
-    try:
-        o = Order.objects.create(
-            user=request.user,
-            package=package,
-            razorpay_order_id=rp_order["id"],
-            amount=amount_paise,
-            currency="INR",
-        )
-        _dbg("CREATE_ORDER:ORDER_DB_OK", order_db_id=o.id, rp_order_id=o.razorpay_order_id)
-    except Exception as e:
-        _dbg("CREATE_ORDER:ORDER_DB_ERR", err=str(e))
-        return Response({"error": "order_db_create_failed", "detail": str(e)}, status=500)
-
-    # ---- Payment Link (STANDARD) — MUST send amount & currency. DO NOT send order_id. ----
-    payment_link_url = None
-    pl_meta = {}
-    try:
-        cust = {
-            "name": (request.user.get_full_name() or request.user.username)[:100],
-            "email": (getattr(request.user, "email", "") or None),
-        }
-        cust = {k: v for k, v in cust.items() if v}
-
-        pl_req = {
-            "amount": amount_paise,
-            "currency": "INR",
-            "reference_id": f"orderdb-{o.id}",
-            "description": f"H2H: {package.name}",
-            "notify": {"email": True, "sms": False},
-            "notes": {
-                "package": package.name,
-                "local_rp_order": rp_order["id"],  # for webhook fallback correlation
-                "booking_id": str(booking_id or ""),
-                "promo_code": (promo and promo.code) or "",
-                "promo_discount_inr": promo_discount,
-            },
-        }
-        if cust:
-            pl_req["customer"] = cust
-
-        _dbg("CREATE_ORDER:PL_REQ", sending={k: v for k, v in pl_req.items() if k != "customer"})
-        pl = client.payment_link.create(pl_req)
-        payment_link_url = pl.get("short_url") or pl.get("url")
-        pl_meta = {"payment_link_id": pl.get("id")}
-        _dbg("CREATE_ORDER:RP_PAYMENT_LINK_OK",
-             payment_link_id=pl_meta.get("payment_link_id"),
-             payment_link_url=payment_link_url)
-    except Exception as e:
-        pl_meta = {"error": str(e)}
-        _dbg("CREATE_ORDER:RP_PAYMENT_LINK_ERR", err=str(e))
-
-    if booking:
-        try:
-            booking.order = o
-            booking.save(update_fields=["order"])
-            _dbg("CREATE_ORDER:BOOKING_LINKED_TO_ORDER", booking_id=booking.id, order_db_id=o.id)
-        except Exception as e:
-            _dbg("CREATE_ORDER:BOOKING_LINK_ERR", err=str(e))
-
-    return Response({
-        "order": {"id": rp_order["id"], "amount": amount_paise, "currency": "INR"},
-        "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
-        "order_db": OrderSerializer(o).data,
-        "payment_link": payment_link_url,          # <—— your frontend reads this
-        "payment_link_meta": pl_meta,              # includes .error if creation failed
-        "ticket_order_id": rp_order["id"],         # <—— used by /tickets/<id>.pdf
-        "ticket_api_path": f"/api/tickets/{rp_order['id']}.pdf",
-        "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else {
-            "base": {"includes": package.base_includes, "price_inr": int(package.price_inr)},
-            "promo": promo_br,
-            "total_inr_before_promo": total_inr,
-            "total_inr": final_inr,
-        },
-    })
-
-
-
-# @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
-# def create_order(request):
-#     """
-#     Body:
-#     {
-#       "package_id": 1,
-#       "booking_id": 123,
-#       "promo_code": "H2H10",
-#       "debug": true
-#     }
-
-#     Capacity precheck ignores Booking.category. Only unit_type (from Package) matters.
-#     """
-#     debug_mode = str(request.data.get("debug") or "").lower() in ("1", "true", "yes", "y")
-#     package_id = request.data.get("package_id")
-#     booking_id = request.data.get("booking_id")
-#     req_promo_code = (request.data.get("promo_code") or "").strip() or None
-
-#     _dbg("CREATE_ORDER:ENTRY",
-#          path=getattr(request, "get_full_path", lambda: "")(),
-#          user_id=getattr(request.user, "id", None),
-#          package_id=package_id,
-#          booking_id=booking_id,
-#          req_promo_code=req_promo_code,
-#          debug_mode=debug_mode)
-
-#     if not package_id:
-#         _dbg("CREATE_ORDER:ERR_NO_PACKAGE_ID")
-#         return Response({"error": "package_id required"}, status=400)
-
-#     try:
-#         package = Package.objects.get(id=package_id, active=True)
-#         _dbg("CREATE_ORDER:PACKAGE_OK", package_id=package.id, package_name=package.name)
-#     except Package.DoesNotExist:
-#         _dbg("CREATE_ORDER:ERR_BAD_PACKAGE", package_id=package_id)
-#         return Response({"error": "invalid package"}, status=404)
-
-#     total_inr = int(package.price_inr)
-#     booking = None
-#     breakdown = None
-#     guests_total = None
-
-#     if booking_id:
-#         try:
-#             booking = Booking.objects.get(id=booking_id, user=request.user)
-#             _dbg("CREATE_ORDER:BOOKING_OK",
-#                  booking_id=booking.id,
-#                  event_id=booking.event_id,
-#                  guests=booking.guests,
-#                  category=(booking.category or "").strip().upper())
-#         except Booking.DoesNotExist:
-#             _dbg("CREATE_ORDER:ERR_BAD_BOOKING", booking_id=booking_id)
-#             return Response({"error": "invalid booking_id"}, status=400)
-
-#         try:
-#             total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
-#             _dbg("CREATE_ORDER:PRICING_OK",
-#                  total_inr=total_inr,
-#                  guests_total=guests_total,
-#                  computed_from=(breakdown or {}).get("computed_from"))
-#         except Exception as ex:
-#             _dbg("CREATE_ORDER:PRICING_ERR", err=str(ex))
-#             return Response({"error": "pricing_failed", "detail": str(ex)}, status=400)
-
-#     # ---- capacity precheck (ignore category) ----
-#     if booking and booking.event_id:
-#         def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
-#             try:
-#                 m2m_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
-#             except Exception:
-#                 m2m_ids = []
-#             if m2m_ids:
-#                 return m2m_ids
-#             names = _allowed_unit_types_for_package(pkg) or set()
-#             if not names:
-#                 return []
-#             ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
-#             if not ids:
-#                 ids = [ut.id for nm in names
-#                        for ut in [UnitType.objects.filter(name__iexact=nm).first()]
-#                        if ut]
-#             return ids
-
-#         allowed_ids = _allowed_utype_ids_for_package(package)
-#         _dbg("CREATE_ORDER:ALLOWED_UNIT_TYPES",
-#              source="M2M" if list(package.allowed_unit_types.all()) else "FALLBACK",
-#              allowed_ids=allowed_ids,
-#              allowed_names=list(UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)))
-
-#         if not allowed_ids:
-#             return Response({
-#                 "error": "package_has_no_allowed_unit_types",
-#                 "message": "Configure allowed unit types on the package or ensure fallback map matches UnitType names."
-#             }, status=400)
-
-#         taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
-
-#         qs_free = (Unit.objects
-#                    .filter(unit_type_id__in=allowed_ids, status="AVAILABLE")
-#                    .exclude(id__in=taken_ids)
-#                    .order_by("-capacity"))
-
-#         pool_count = qs_free.count()
-#         needed = max(1, int(booking.guests or 1))
-#         cap = 0
-#         sample = []
-#         for u in qs_free.iterator(chunk_size=500):
-#             if len(sample) < 10:
-#                 sample.append({
-#                     "id": u.id,
-#                     "label": u.label,
-#                     "property": getattr(u.property, "name", ""),
-#                     "unit_type": getattr(u.unit_type, "name", ""),
-#                     "category": u.category,
-#                     "capacity": u.capacity or 1,
-#                 })
-#             cap += (u.capacity or 1)
-#             if cap >= needed:
-#                 break
-
-#         _dbg("CREATE_ORDER:CAPACITY_CHECK_IGNORE_CATEGORY",
-#              needed=needed, cap_seen=cap, pool_count=pool_count,
-#              taken_ids_count=len(taken_ids), sample_units=sample)
-
-#         if cap < needed:
-#             return Response({
-#                 "error": "house_full",
-#                 "message": "No capacity left for this package for the event (category ignored).",
-#                 "debug": {
-#                     "event_id": booking.event_id,
-#                     "package_id": package.id,
-#                     "needed": needed,
-#                     "allowed_unit_type_names": list(
-#                         UnitType.objects.filter(id__in=allowed_ids).values_list("name", flat=True)
-#                     ),
-#                     "pool_units": pool_count,
-#                     "capacity_available": cap,
-#                     "units_sample": sample
-#                 }
-#             }, status=409)
-
-#     # ---- promo ----
-#     promo = booking.promo_code if (booking and booking.promo_code_id) else _get_live_promocode(req_promo_code)
-#     _dbg("CREATE_ORDER:PROMO",
-#          source="booking" if (booking and booking.promo_code_id) else "request",
-#          code=(getattr(promo, "code", None) or None))
-
-#     try:
-#         promo_discount, final_inr, promo_br = _apply_promocode(total_inr, promo)
-#         _dbg("CREATE_ORDER:PROMO_APPLIED",
-#              total_before=total_inr, discount=promo_discount, total_after=final_inr)
-#     except Exception as ex:
-#         _dbg("CREATE_ORDER:PROMO_ERR", err=str(ex))
-#         return Response({"error": "promo_apply_failed", "detail": str(ex)}, status=400)
-
-#     if booking:
-#         try:
-#             if promo_br:
-#                 breakdown = breakdown or {}
-#                 breakdown = {**breakdown, "promo": promo_br}
-#             booking.pricing_total_inr = final_inr
-#             booking.pricing_breakdown = breakdown or booking.pricing_breakdown
-#             booking.guests = guests_total if guests_total is not None else booking.guests
-#             booking.promo_discount_inr = promo_discount
-#             booking.promo_breakdown = promo_br
-#             if promo and not booking.promo_code_id:
-#                 booking.promo_code = promo
-#             booking.save(update_fields=[
-#                 "pricing_total_inr", "pricing_breakdown", "guests",
-#                 "promo_discount_inr", "promo_breakdown", "promo_code"
-#             ])
-#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_OK", booking_id=booking.id, final_inr=final_inr)
-#         except Exception as ex:
-#             _dbg("CREATE_ORDER:BOOKING_SNAPSHOT_ERR", err=str(ex))
-#             return Response({"error": "pricing_snapshot_failed", "detail": str(ex)}, status=400)
-
-#     amount_paise = max(1, int(final_inr)) * 100
-#     try:
-#         client = _get_razorpay_client()
-#     except RuntimeError as e:
-#         _dbg("CREATE_ORDER:RAZORPAY_CLIENT_ERR", err=str(e))
-#         return Response({"error": str(e)}, status=503)
-
-#     # ---- Razorpay order ----
-#     try:
-#         rp_order = client.order.create({
-#             "amount": amount_paise,
-#             "currency": "INR",
-#             "payment_capture": 1,
-#             "notes": {
-#                 "package": package.name,
-#                 "booking_id": booking_id or "",
-#                 "promo_code": (promo and promo.code) or ""
-#             },
-#         })
-#         _dbg("CREATE_ORDER:RP_ORDER_OK", rp_order_id=rp_order.get("id"), amount_paise=amount_paise)
-#     except Exception as e:
-#         _dbg("CREATE_ORDER:RP_ORDER_ERR", err=str(e))
-#         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
-
-#     # ---- local order ----
-#     try:
-#         o = Order.objects.create(
-#             user=request.user,
-#             package=package,
-#             razorpay_order_id=rp_order["id"],
-#             amount=amount_paise,
-#             currency="INR",
-#         )
-#         _dbg("CREATE_ORDER:ORDER_DB_OK", order_db_id=o.id, rp_order_id=o.razorpay_order_id)
-#     except Exception as e:
-#         _dbg("CREATE_ORDER:ORDER_DB_ERR", err=str(e))
-#         return Response({"error": "order_db_create_failed", "detail": str(e)}, status=500)
-
-#     # ---- Payment Link (BOUND to SAME order_id; NO amount/currency here) ----
-#     payment_link_url = None
-#     pl_meta = {}
-#     try:
-#         cust = {
-#             "name": (request.user.get_full_name() or request.user.username)[:100],
-#             "email": (getattr(request.user, "email", "") or None),
-#         }
-#         cust = {k: v for k, v in cust.items() if v}
-
-#         pl_req = {
-#             "reference_id": f"orderdb-{o.id}",
-#             "description": f"H2H: {package.name}",
-#             "notify": {"email": True, "sms": False},
-#             "notes": {
-#                 "package": package.name,
-#                 "local_rp_order": rp_order["id"],
-#                 "booking_id": str(booking_id or ""),
-#                 "promo_code": (promo and promo.code) or "",
-#                 "promo_discount_inr": promo_discount,
-#             },
-#             "order_id": rp_order["id"],  # ******** key line: bind PL to the same order ********
-#         }
-#         if cust:
-#             pl_req["customer"] = cust
-
-#         _dbg("CREATE_ORDER:PL_REQ", sending={k: v for k, v in pl_req.items() if k != "customer"})
-#         pl = client.payment_link.create(pl_req)
-#         payment_link_url = pl.get("short_url") or pl.get("url")
-#         pl_meta = {"payment_link_id": pl.get("id"), "order_id": pl.get("order_id")}
-#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_OK",
-#              payment_link_id=pl_meta.get("payment_link_id"),
-#              pl_order_id=pl_meta.get("order_id"),
-#              payment_link_url=payment_link_url)
-#         # DO NOT overwrite o.razorpay_order_id here; it is already the canonical one.
-#     except Exception as e:
-#         pl_meta = {"error": str(e)}
-#         _dbg("CREATE_ORDER:RP_PAYMENT_LINK_ERR", err=str(e))
-
-#     if booking:
-#         try:
-#             booking.order = o
-#             booking.save(update_fields=["order"])
-#             _dbg("CREATE_ORDER:BOOKING_LINKED_TO_ORDER", booking_id=booking.id, order_db_id=o.id)
-#         except Exception as e:
-#             _dbg("CREATE_ORDER:BOOKING_LINK_ERR", err=str(e))
-
-#     return Response({
-#         "order": {"id": rp_order["id"], "amount": amount_paise, "currency": "INR"},
-#         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
-#         "order_db": OrderSerializer(o).data,
-#         "payment_link": payment_link_url,
-#         "payment_link_meta": pl_meta,
-#         "ticket_order_id": rp_order["id"],
-#         "ticket_api_path": f"/api/tickets/{rp_order['id']}.pdf",
-#         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else {
-#             "base": {"includes": package.base_includes, "price_inr": int(package.price_inr)},
-#             "promo": promo_br,
-#             "total_inr_before_promo": total_inr,
-#             "total_inr": final_inr,
-#         },
-#     })
-
-
-
 
 # -----------------------------------
 # Razorpay Webhook (with allocation hook)
@@ -2296,7 +1853,7 @@ def razorpay_webhook(request):
 
                     # IMPORTANT: do NOT validate against booking.unit_type here.
                     picks = allocate_units_for_booking(booking, pkg=matched.package)
-
+                    _finalize_sightseeing_if_requested(booking)
                     # tiny breadcrumb for logs
                     try:
                         labels = [getattr(u, "label", u.id) for u in picks]
@@ -2546,3 +2103,167 @@ def logout_view(request):
     resp.delete_cookie("sessionid", path="/")
     return resp
 
+# h2h/views.py
+import re
+import secrets
+from urllib.parse import quote
+from django.http import HttpResponseRedirect
+from django.conf import settings
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+
+def _cfg(key, default=None):
+    return getattr(settings, "COGNITO", {}).get(key, default)
+
+def _default_frontend_callback(request):
+    origin = (
+        request.headers.get("Origin")
+        or f"{'https' if request.is_secure() else 'http'}://{request.get_host()}"
+    ).rstrip("/")
+    # change "sso/callback" to your actual FE route if different
+    return f"{origin}/auth/sso/callback"
+
+def _normalize_domain(domain: str) -> str:
+    """
+    Ensure the Cognito domain is absolute (with scheme) and no trailing slash.
+    If settings.COGNITO['DOMAIN'] is like 'xxx.auth.ap-south-1.amazoncognito.com'
+    this turns it into 'https://xxx.auth.ap-south-1.amazoncognito.com'.
+    """
+    d = (domain or "").strip().rstrip("/")
+    if not d:
+        raise RuntimeError("COGNITO.DOMAIN not configured")
+    if not re.match(r"^https?://", d):
+        d = f"https://{d}"
+    return d
+
+def _cognito_authorize_url(redirect_uri: str, state: str) -> str:
+    domain = _normalize_domain(_cfg("DOMAIN"))
+    client_id = _cfg("CLIENT_ID")
+    scope = _cfg("SCOPES", "openid email profile")
+    if not client_id:
+        raise RuntimeError("COGNITO.CLIENT_ID not configured")
+    return (
+        f"{domain}/oauth2/authorize"
+        f"?client_id={quote(client_id)}"
+        f"&response_type=code"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
+        f"&scope={quote(scope)}"
+        f"&state={quote(state)}"
+    )
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def login_redirect(request):
+    """
+    Always 302 to Cognito's hosted UI.
+    Accepts optional ?redirect_uri= and ?state=.
+    """
+    state = request.query_params.get("state") or secrets.token_urlsafe(12)
+    redirect_uri = (
+        request.query_params.get("redirect_uri")
+        # your settings already have this:
+        or _cfg("REDIRECT_URI")
+        or _default_frontend_callback(request)
+    )
+
+    # optional: store state for verification in callback
+    request.session["sso_expected_state"] = state
+
+    url = _cognito_authorize_url(redirect_uri, state)
+    return HttpResponseRedirect(url)
+
+
+
+
+
+# views.py
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def sightseeing_optin(request):
+    """
+    Body:
+    {
+      "booking_id": 123,
+      "opt_in": true,           # required: true means reserve spot
+      "guests": null|number     # optional; defaults to booking.guests
+    }
+
+    Behavior:
+      - If order is NOT paid -> mark booking.sightseeing_opt_in_pending=True and remember requested count.
+      - If order IS paid -> create a SightseeingRegistration immediately.
+    """
+    booking_id = request.data.get("booking_id")
+    opt_in = request.data.get("opt_in")
+    guests_req = request.data.get("guests")
+
+    if booking_id is None or str(booking_id).strip() == "":
+        return Response({"error": "booking_id required"}, status=400)
+
+    # normalize boolean
+    if isinstance(opt_in, str):
+        opt_in = opt_in.strip().lower() in ("1", "true", "yes", "y")
+
+    if opt_in is not True:
+        # optional: allow opt-out by clearing pending flag/cancelling reg if exists
+        try:
+            b = Booking.objects.get(id=booking_id, user=request.user)
+        except Booking.DoesNotExist:
+            return Response({"error": "invalid booking_id"}, status=404)
+
+        # If a registration exists and order is paid, cancel it.
+        if getattr(b, "order_id", None) and b.order.paid and hasattr(b, "sightseeing") and b.sightseeing:
+            b.sightseeing.status = "CANCELLED"
+            b.sightseeing.save(update_fields=["status"])
+            return Response({"ok": True, "cancelled": True})
+
+        # Otherwise, just clear the pending flag
+        if b.sightseeing_opt_in_pending:
+            b.sightseeing_opt_in_pending = False
+            b.sightseeing_requested_count = 0
+            b.save(update_fields=["sightseeing_opt_in_pending", "sightseeing_requested_count"])
+        return Response({"ok": True, "pending": False})
+
+    # opt_in == True pathway
+    try:
+        b = (Booking.objects
+             .select_related("order", "user")
+             .get(id=booking_id, user=request.user))
+    except Booking.DoesNotExist:
+        return Response({"error": "invalid booking_id"}, status=404)
+
+    # how many?
+    try:
+        count = int(guests_req) if guests_req is not None else int(b.guests or 1)
+        count = max(1, min(100, count))
+    except Exception:
+        count = max(1, int(b.guests or 1))
+
+    if getattr(b, "order_id", None) and b.order.paid:
+        # payment done -> create immediately
+        try:
+            if hasattr(b, "sightseeing") and b.sightseeing:
+                # idempotency
+                b.sightseeing.guests = count
+                b.sightseeing.status = "CONFIRMED"
+                b.sightseeing.save(update_fields=["guests", "status"])
+                return Response({"ok": True, "created": False, "registration_id": b.sightseeing.id})
+            # create new
+            _finalize_sightseeing_if_requested(b)  # uses booking.guests; set requested first
+            if not (hasattr(b, "sightseeing") and b.sightseeing):
+                # ensure creation with desired count
+                reg = SightseeingRegistration.objects.create(
+                    user=b.user, booking=b, guests=count, pay_at_venue=True, status="CONFIRMED"
+                )
+                return Response({"ok": True, "created": True, "registration_id": reg.id})
+            # adjust guests to requested count
+            b.sightseeing.guests = count
+            b.sightseeing.save(update_fields=["guests"])
+            return Response({"ok": True, "created": True, "registration_id": b.sightseeing.id})
+        except Exception as ex:
+            return Response({"error": "create_failed", "detail": str(ex)}, status=400)
+    else:
+        # not paid yet -> store only a pending flag (no registration row)
+        b.sightseeing_opt_in_pending = True
+        b.sightseeing_requested_count = count
+        b.save(update_fields=["sightseeing_opt_in_pending", "sightseeing_requested_count"])
+        return Response({"ok": True, "pending": True, "requested_guests": count})
