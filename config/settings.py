@@ -158,6 +158,11 @@ COGNITO = {
     "SCOPES": os.getenv("COGNITO_SCOPES", "openid email"),
 }
 
+
+PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "http://localhost:5173/register?payment=success")
+PAYMENT_FAILED_URL  = os.getenv("PAYMENT_FAILED_URL",  "http://localhost:5173/register?payment=failed")
+PAYMENT_RETURN_TO   = os.getenv("PAYMENT_RETURN_TO", "http://localhost:5173/register")
+
 # ---- Razorpay (optional; leave blank until configured) ----
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")

@@ -4,9 +4,11 @@ import hmac
 import hashlib
 import json
 from datetime import date
+from django.utils import timezone as dj_timezone
+
 
 from django.conf import settings
-from django.http import JsonResponse, HttpResponse
+from django.http import HttpResponseBadRequest, HttpResponseNotFound, JsonResponse, HttpResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.contrib.auth import login
@@ -17,9 +19,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from collections import defaultdict, Counter
 from rest_framework.response import Response
+from urllib.parse import parse_qsl, quote, urlparse, urlunparse
 
 import secrets
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from django.shortcuts import redirect
 from django.conf import settings
 from rest_framework.decorators import api_view, permission_classes
@@ -548,80 +551,6 @@ def my_bookings(request):
 # -----------------------------------
 # Pricing helpers
 # -----------------------------------
-# def _compute_booking_pricing(package: Package, booking: Booking):
-    """
-    Compute total INR for a booking:
-      - Base price covers 'base_includes' people.
-      - Extra ADULT: extra_price_adult_inr (or base price if 0).
-      - Child <= child_free_max_age: free
-      - Child <= child_half_max_age: child_half_multiplier * extra adult price
-    Guests can be provided either as explicit counts or as ages list.
-    """
-    base_includes = package.base_includes or 1
-    base_price = int(package.price_inr)
-    extra_adult_price = int(package.extra_price_adult_inr or base_price)
-    half_mult = package.child_half_multiplier or 0.5
-    free_max = package.child_free_max_age or 5
-    half_max = package.child_half_max_age or 15
-    if half_max < free_max:
-        half_max = free_max  # guard
-
-    # derive counts
-    extra_adults = booking.extra_adults or 0
-    child_half = booking.extra_children_half or 0
-    child_free = booking.extra_children_free or 0
-
-    # If ages are provided, override counts based on server-side rules
-    ages = booking.guest_ages or []
-    if isinstance(ages, list) and ages:
-        a = h = f = 0
-        for age in ages:
-            try:
-                age = int(age)
-            except Exception:
-                continue
-            if age <= free_max:
-                f += 1
-            elif age <= half_max:
-                h += 1
-            else:
-                a += 1
-        extra_adults, child_half, child_free = a, h, f
-
-    # Sanity: guests = base_includes + extras
-    extras_total = max(0, extra_adults + child_half + child_free)
-    guests_total = max(base_includes, booking.guests or (base_includes + extras_total))
-    if guests_total < base_includes + extras_total:
-        guests_total = base_includes + extras_total
-
-    # charges
-    child_half_price = int(round(extra_adult_price * float(half_mult)))
-    extras_amount = (extra_adults * extra_adult_price) + (child_half * child_half_price)  # free pays 0
-    total_inr = base_price + extras_amount
-
-    breakdown = {
-        "base": {"includes": base_includes, "price_inr": base_price},
-        "extra_unit_prices": {
-            "adult_inr": extra_adult_price,
-            "child_half_inr": child_half_price,
-            "child_free_inr": 0,
-        },
-        "extra_counts": {
-            "adult": extra_adults,
-            "child_half": child_half,
-            "child_free": child_free,
-        },
-        "extras_amount_inr": extras_amount,
-        "total_inr": total_inr,
-        "rules": {
-            "child_free_max_age": free_max,
-            "child_half_max_age": half_max,
-            "child_half_multiplier": half_mult,
-        },
-    }
-
-    return total_inr, breakdown, guests_total
-
 
 def _compute_booking_pricing(package: Package, booking: Booking):
     """
@@ -776,199 +705,21 @@ def _compute_booking_pricing(package: Package, booking: Booking):
 # Payments
 # -----------------------------------
 
-## version 3: refactored create_order with helper function
-
-# @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
-# def create_order(request):
-#     """
-#     Optionally accept booking_id to compute final amount including extra guests.
-#     Body:
-#     {
-#       "package_id": 1,
-#       "booking_id": 123,          # optional but recommended
-#       "pass_platform_fee": true,  # optional; default true (adds convenience fee)
-#       "assume_method": "card"     # optional: "card"|"netbanking"|"upi"; selects fee rate
-#     }
-#     """
-#     package_id = request.data.get("package_id")
-#     booking_id = request.data.get("booking_id")
-
-#     if not package_id:
-#         return Response({"error": "package_id required"}, status=400)
-
-#     try:
-#         package = Package.objects.get(id=package_id, active=True)
-#     except Package.DoesNotExist:
-#         return Response({"error": "invalid package"}, status=404)
-
-#     # ---- Compute base server-side amount ----
-#     total_inr = int(package.price_inr)
-
-#     booking = None
-#     breakdown = None
-#     guests_total = None
-
-#     if booking_id:
-#         try:
-#             booking = Booking.objects.get(id=booking_id, user=request.user)
-#         except Booking.DoesNotExist:
-#             return Response({"error": "invalid booking_id"}, status=400)
-
-#         # Validate package vs chosen unit_type
-#         try:
-#             _validate_package_vs_unit_type(package, booking.unit_type)
-#         except ValueError as ve:
-#             return Response({"error": str(ve)}, status=400)
-
-#         # Compute full booking price (base + extras) and snapshot it
-#         total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
-#         booking.pricing_total_inr = total_inr
-#         booking.pricing_breakdown = breakdown
-#         booking.guests = guests_total
-#         booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
-
-#     # ---- Convenience fee (detailed split) ------------------------------
-#     # default ON
-#     pass_platform_fee = request.data.get("pass_platform_fee")
-#     if pass_platform_fee is None:
-#         pass_platform_fee = True
-#     # normalize to bool if someone sends "true"/"1"
-#     if isinstance(pass_platform_fee, str):
-#         pass_platform_fee = pass_platform_fee.strip().lower() in ("1","true","yes","y")
-
-#     assume_method = (request.data.get("assume_method") or "").strip().lower()
-#     rate = RAZORPAY_UPI_FEE_RATE if assume_method == "upi" else RAZORPAY_PLATFORM_FEE_RATE
-
-#     conv = _conv_fee_breakdown(total_inr, rate, RAZORPAY_PLATFORM_FEE_GST) if pass_platform_fee else None
-#     conv_fee_inr = int(conv["fee_inr"]) if conv else 0
-#     gross_inr = int(conv["gross_total_inr"]) if conv else int(total_inr)
-#     amount_paise = int(gross_inr) * 100
-
-#     # ---- Razorpay client ----------------------------------------------
-#     try:
-#         client = _get_razorpay_client()
-#     except RuntimeError as e:
-#         return Response({"error": str(e)}, status=503)
-
-#     # (A) Create Razorpay order (charge the GROSS amount)
-#     try:
-#         rp_order = client.order.create({
-#             "amount": amount_paise,
-#             "currency": "INR",
-#             "payment_capture": 1,
-#             "notes": {
-#                 "package": package.name,
-#                 "booking_id": booking_id or "",
-#                 "base_amount_inr": str(total_inr),
-#                 "convenience_fee_inr": str(conv_fee_inr),
-#                 "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
-#                 "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
-#                 "assume_method": assume_method or "auto",
-#             },
-#         })
-#     except Exception as e:
-#         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
-
-#     # Persist local Order with GROSS amount (customer pays this)
-#     o = Order.objects.create(
-#         user=request.user,
-#         package=package,
-#         razorpay_order_id=rp_order["id"],
-#         amount=amount_paise,
-#         currency="INR",
-#     )
-
-#     # (B) Payment Link (hosted checkout)
-#     payment_link_url = None
-#     pl_meta = {}
-#     try:
-#         cust = {
-#             "name": (request.user.get_full_name() or request.user.username)[:100],
-#             "email": (getattr(request.user, "email", "") or None),
-#         }
-#         cust = {k: v for k, v in cust.items() if v}
-
-#         pl_req = {
-#             "amount": amount_paise,               # charge gross amount
-#             "currency": "INR",
-#             "reference_id": f"orderdb-{o.id}",
-#             "description": f"H2H: {package.name}",
-#             "notify": {"email": True, "sms": False},
-#             "notes": {
-#                 "package": package.name,
-#                 "local_rp_order": rp_order["id"],
-#                 "booking_id": str(booking_id or ""),
-#                 "base_amount_inr": str(total_inr),
-#                 "convenience_fee_inr": str(conv_fee_inr),
-#                 "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
-#                 "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
-#                 "assume_method": assume_method or "auto",
-#             },
-#         }
-#         if cust:
-#             pl_req["customer"] = cust
-
-#         pl = client.payment_link.create(pl_req)
-#         payment_link_url = pl.get("short_url")
-#         if pl.get("order_id"):
-#             # Sync to PL-generated order id (common with Payment Links)
-#             o.razorpay_order_id = pl["order_id"]
-#             o.save(update_fields=["razorpay_order_id"])
-#             rp_order["id"] = pl["order_id"]
-#         pl_meta = {"payment_link_id": pl.get("id")}
-#     except Exception as e:
-#         pl_meta = {"error": str(e)}
-
-#     # ---- Link booking + persist detailed convenience breakdown ---------
-#     if booking:
-#         booking.order = o
-#         try:
-#             bd = dict(booking.pricing_breakdown or {})
-#             if conv:
-#                 bd["convenience"] = {
-#                     "method": assume_method or "auto",
-#                     **conv,  # rate, gst_rate, platform_fee_inr, platform_gst_inr, fee_inr, gross_total_inr
-#                 }
-#                 booking.pricing_breakdown = bd
-#                 booking.pricing_total_inr = gross_inr
-#                 booking.save(update_fields=["order", "pricing_breakdown", "pricing_total_inr"])
-#             else:
-#                 booking.save(update_fields=["order"])
-#         except Exception:
-#             booking.save(update_fields=["order"])
-
-#     # ---- Response ------------------------------------------------------
-#     return Response({
-#         "order": rp_order,
-#         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
-#         "order_db": OrderSerializer(o).data,
-#         "payment_link": payment_link_url,
-#         "payment_link_meta": pl_meta,
-#         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else None,
-#         "base_amount_inr": int(total_inr),
-#         "convenience_fee_inr": int(conv_fee_inr),
-#         "gross_amount_inr": int(gross_inr),
-#         # Optional: echo the detailed split so FE can show it without re-reading the booking
-#         "convenience": ({"method": assume_method or "auto", **conv} if conv else None),
-#     })
+## version 4: create_order simplified to accept only booking_id
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_order(request):
     """
-    Optionally accept booking_id to compute final amount including extra guests.
-    Body:
-    {
-      "package_id": 1,
-      "booking_id": 123,          # optional but recommended
-      "pass_platform_fee": true,  # optional; default true (adds convenience fee)
-      "assume_method": "card"     # optional: "card"|"netbanking"|"upi"; selects fee rate
-    }
+    Creates a Razorpay Order + Payment Link and returns the hosted checkout URL.
+    Accepts optional:
+      - booking_id            (compute total incl. extras)
+      - pass_platform_fee     (default true)
+      - assume_method         ("upi" uses UPI fee rate, else platform fee rate)
+      - return_to             (absolute FE URL to land on after payment)
     """
     package_id = request.data.get("package_id")
     booking_id = request.data.get("booking_id")
-
     if not package_id:
         return Response({"error": "package_id required"}, status=400)
 
@@ -977,65 +728,44 @@ def create_order(request):
     except Package.DoesNotExist:
         return Response({"error": "invalid package"}, status=404)
 
-    # ---- Compute base server-side amount ----
+    # ---- base amount (and booking snapshot if provided) ----
     total_inr = int(package.price_inr)
-
     booking = None
-    breakdown = None
-    guests_total = None
-
     if booking_id:
         try:
             booking = Booking.objects.get(id=booking_id, user=request.user)
         except Booking.DoesNotExist:
             return Response({"error": "invalid booking_id"}, status=400)
 
-        # If exactly one unit type is allowed for this package and booking has none, auto-assign it
+        # if only one unit type allowed, auto-pin it for this booking
         try:
             if getattr(booking, "unit_type_id", None) is None and hasattr(package, "allowed_unit_types"):
                 if package.allowed_unit_types.count() == 1:
                     booking.unit_type = package.allowed_unit_types.first()
                     booking.save(update_fields=["unit_type"])
         except Exception:
-            # non-fatal; fall through to validation
             pass
 
-        # Validate package vs chosen unit_type (clean 400s instead of AttributeError)
+        # validate mapping
         try:
             _validate_package_vs_unit_type(package, getattr(booking, "unit_type", None))
         except ValueError as ve:
             code = str(ve)
-            if code == "unit_type_required":
-                return Response(
-                    {"error": "Please select an accommodation type for this package.", "code": code},
-                    status=400
-                )
-            if code == "unit_type_not_allowed":
-                return Response(
-                    {"error": "The selected accommodation type is not allowed for this package.", "code": code},
-                    status=400
-                )
-            return Response({"error": str(ve)}, status=400)
-        except AttributeError:
-            # Defensive: if validator wasn't updated and tried unit_type.name on None
-            return Response(
-                {"error": "Please select an accommodation type for this package.", "code": "unit_type_required"},
-                status=400
-            )
+            msg = "Please select an accommodation type for this package." if code == "unit_type_required" else \
+                  "The selected accommodation type is not allowed for this package." if code == "unit_type_not_allowed" else str(ve)
+            return Response({"error": msg, "code": code}, status=400)
 
-        # Compute full booking price (base + extras) and snapshot it
+        # compute full price (+ snapshot)
         total_inr, breakdown, guests_total = _compute_booking_pricing(package, booking)
         booking.pricing_total_inr = total_inr
         booking.pricing_breakdown = breakdown
         booking.guests = guests_total
         booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
 
-    # ---- Convenience fee (detailed split) ------------------------------
-    # default ON
+    # ---- convenience fee gross-up ----
     pass_platform_fee = request.data.get("pass_platform_fee")
     if pass_platform_fee is None:
         pass_platform_fee = True
-    # normalize to bool if someone sends "true"/"1"
     if isinstance(pass_platform_fee, str):
         pass_platform_fee = pass_platform_fee.strip().lower() in ("1", "true", "yes", "y")
 
@@ -1045,15 +775,15 @@ def create_order(request):
     conv = _conv_fee_breakdown(total_inr, rate, RAZORPAY_PLATFORM_FEE_GST) if pass_platform_fee else None
     conv_fee_inr = int(conv["fee_inr"]) if conv else 0
     gross_inr = int(conv["gross_total_inr"]) if conv else int(total_inr)
-    amount_paise = int(gross_inr) * 100
+    amount_paise = gross_inr * 100
 
-    # ---- Razorpay client ----------------------------------------------
+    # ---- Razorpay client ----
     try:
         client = _get_razorpay_client()
     except RuntimeError as e:
         return Response({"error": str(e)}, status=503)
 
-    # (A) Create Razorpay order (charge the GROSS amount)
+    # (A) Create Order
     try:
         rp_order = client.order.create({
             "amount": amount_paise,
@@ -1072,16 +802,13 @@ def create_order(request):
     except Exception as e:
         return Response({"error": f"Failed to create Razorpay order: {e}"}, status=502)
 
-    # Persist local Order with GROSS amount (customer pays this)
+    # Persist local order (GROSS)
     o = Order.objects.create(
-        user=request.user,
-        package=package,
-        razorpay_order_id=rp_order["id"],
-        amount=amount_paise,
-        currency="INR",
+        user=request.user, package=package,
+        razorpay_order_id=rp_order["id"], amount=amount_paise, currency="INR",
     )
 
-    # (B) Payment Link (hosted checkout)
+    # (B) Create Payment Link with a proper callback
     payment_link_url = None
     pl_meta = {}
     try:
@@ -1092,7 +819,7 @@ def create_order(request):
         cust = {k: v for k, v in cust.items() if v}
 
         pl_req = {
-            "amount": amount_paise,               # charge gross amount
+            "amount": amount_paise,
             "currency": "INR",
             "reference_id": f"orderdb-{o.id}",
             "description": f"H2H: {package.name}",
@@ -1111,10 +838,22 @@ def create_order(request):
         if cust:
             pl_req["customer"] = cust
 
+        # >>> FIX: build callback URL with local oid and optional return_to
+        from django.urls import reverse
+        base_cb = request.build_absolute_uri(reverse("razorpay_callback"))
+        query = {"oid": o.id}
+        return_to = (request.data.get("return_to") or getattr(settings, "PAYMENT_RETURN_TO", None))
+        if return_to:
+            query["return_to"] = return_to  # _payment_redirect_url reads 'return_to'
+        callback_abs = f"{base_cb}?{urlencode(query)}"
+
+        pl_req["callback_url"] = callback_abs
+        pl_req["callback_method"] = "get"
+
         pl = client.payment_link.create(pl_req)
         payment_link_url = pl.get("short_url")
         if pl.get("order_id"):
-            # Sync to PL-generated order id (common with Payment Links)
+            # Payment Links sometimes generate a different RP order id
             o.razorpay_order_id = pl["order_id"]
             o.save(update_fields=["razorpay_order_id"])
             rp_order["id"] = pl["order_id"]
@@ -1122,16 +861,13 @@ def create_order(request):
     except Exception as e:
         pl_meta = {"error": str(e)}
 
-    # ---- Link booking + persist detailed convenience breakdown ---------
+    # attach order to booking & store convenience split
     if booking:
         booking.order = o
         try:
             bd = dict(booking.pricing_breakdown or {})
             if conv:
-                bd["convenience"] = {
-                    "method": assume_method or "auto",
-                    **conv,  # rate, gst_rate, platform_fee_inr, platform_gst_inr, fee_inr, gross_total_inr
-                }
+                bd["convenience"] = {"method": assume_method or "auto", **conv}
                 booking.pricing_breakdown = bd
                 booking.pricing_total_inr = gross_inr
                 booking.save(update_fields=["order", "pricing_breakdown", "pricing_total_inr"])
@@ -1140,24 +876,19 @@ def create_order(request):
         except Exception:
             booking.save(update_fields=["order"])
 
-    # ---- Response ------------------------------------------------------
     return Response({
         "order": rp_order,
         "key_id": getattr(settings, "RAZORPAY_KEY_ID", None),
         "order_db": OrderSerializer(o).data,
         "payment_link": payment_link_url,
         "payment_link_meta": pl_meta,
+        "callback_url": callback_abs,
         "pricing_snapshot": getattr(booking, "pricing_breakdown", None) if booking else None,
         "base_amount_inr": int(total_inr),
         "convenience_fee_inr": int(conv_fee_inr),
         "gross_amount_inr": int(gross_inr),
-        # Optional: echo the detailed split so FE can show it without re-reading the booking
         "convenience": ({"method": assume_method or "auto", **conv} if conv else None),
     })
-
-
-## version 4: create_order simplified to accept only booking_id
-
 
 
 # -----------------------------------
@@ -1569,67 +1300,6 @@ def _apply_promocode(total_inr: int, promo: PromoCode | None) -> tuple[int, int,
     return discount, final, breakdown
 
 
-# ---------- PUBLIC: Validate promocode (ADD) ----------
-# @api_view(["GET"])
-# @permission_classes([AllowAny])
-# def validate_promocode(request):
-#     """
-#     GET params:
-#       code=H2H10
-#       amount_inr=5000             # optional base to preview (if not provided, tries booking_id or package_id)
-#       booking_id=123              # optional; uses computed booking price
-#       package_id=1                # optional; falls back to package base price
-#     """
-#     code = (request.GET.get("code") or "").strip()
-#     if not code:
-#         return Response({"valid": False, "reason": "code_required"}, status=400)
-
-#     promo = _get_live_promocode(code)
-#     if not promo:
-#         return Response({"valid": False, "reason": "invalid_or_expired"}, status=200)
-
-#     # Determine a base amount to preview discount
-#     amount = request.GET.get("amount_inr")
-#     base_inr = None
-
-#     if amount is not None:
-#         try:
-#             base_inr = max(1, int(float(amount)))
-#         except Exception:
-#             return Response({"valid": False, "reason": "bad_amount"}, status=400)
-
-#     elif request.GET.get("booking_id"):
-#         try:
-#             booking = Booking.objects.get(id=int(request.GET["booking_id"]))
-#             # choose a package context if the booking is linked to an order else use any active package?
-#             # We'll use the order's package if present, else require package_id param.
-#             pkg = booking.order.package if booking.order_id else None
-#             if not pkg and request.GET.get("package_id"):
-#                 pkg = Package.objects.get(id=int(request.GET["package_id"]), active=True)
-#             if not pkg:
-#                 return Response({"valid": False, "reason": "package_required"}, status=400)
-#             # reuse your pricing rules
-#             base_inr, _, _ = _compute_booking_pricing(pkg, booking)
-#         except Exception:
-#             return Response({"valid": False, "reason": "bad_booking_or_package"}, status=400)
-
-#     elif request.GET.get("package_id"):
-#         try:
-#             pkg = Package.objects.get(id=int(request.GET["package_id"]), active=True)
-#             base_inr = int(pkg.price_inr)
-#             if pkg and getattr(pkg, "promo_active", True) is False:
-#                 return Response({"valid": False, "reason": "promo_disabled_for_package"}, status=200)
-#         except Exception:
-#             return Response({"valid": False, "reason": "bad_package"}, status=400)
-
-#     else:
-#         return Response({"valid": True, "promo": {"code": promo.code, "kind": promo.kind, "value": promo.value}},
-#                         status=200)
-
-#     discount, final, br = _apply_promocode(base_inr, promo)
-#     return Response({"valid": True, "base_inr": base_inr, "discount_inr": discount, "final_inr": final, "promo": br})
-
-
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def validate_promocode(request):
@@ -1926,148 +1596,6 @@ def create_booking(request):
 # -----------------------------------
 # Razorpay Webhook (with allocation hook)
 # -----------------------------------
-
-# @csrf_exempt
-# @api_view(["POST"])
-# @permission_classes([AllowAny])
-# def razorpay_webhook(request):
-#     secret = getattr(settings, "RAZORPAY_WEBHOOK_SECRET", None)
-#     if not secret:
-#         return HttpResponse("webhook not configured", status=503)
-
-#     body = request.body
-#     received_sig = request.headers.get("X-Razorpay-Signature", "")
-#     expected_sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-
-#     # Parse JSON safely (even before signature check, so we can log what we got)
-#     try:
-#         evt = json.loads(body.decode("utf-8"))
-#     except Exception:
-#         WebhookEvent.objects.create(
-#             event="__parse_error__",
-#             signature=received_sig,
-#             remote_addr=request.META.get("REMOTE_ADDR"),
-#             payload={"raw": "invalid json"},
-#             raw_body=body.decode("utf-8", errors="replace"),
-#             processed_ok=False,
-#             error="Invalid JSON",
-#         )
-#         return HttpResponse("bad json", status=400)
-
-#     # Create initial log row
-#     log = WebhookEvent.objects.create(
-#         provider="razorpay",
-#         event=evt.get("event") or "",
-#         signature=received_sig,
-#         remote_addr=request.META.get("REMOTE_ADDR"),
-#         payload=evt,
-#         raw_body=body.decode("utf-8", errors="replace"),
-#         processed_ok=False,
-#     )
-
-#     # Verify signature
-#     if not hmac.compare_digest(received_sig, expected_sig):
-#         log.error = "invalid signature"
-#         log.save(update_fields=["error", "processed_at"])
-#         return HttpResponse("invalid signature", status=400)
-
-#     event_name = evt.get("event")
-#     payload = evt.get("payload", {}) or {}
-
-#     matched = None
-
-#     def mark_paid_by_order_id(order_id: str, payment_id: str | None = None):
-#         nonlocal matched
-#         if not order_id:
-#             return False
-#         try:
-#             o = Order.objects.get(razorpay_order_id=order_id)
-#             matched = o
-#             if not o.paid:
-#                 o.paid = True
-#                 if payment_id:
-#                     o.razorpay_payment_id = payment_id
-#                 o.save(update_fields=["paid", "razorpay_payment_id"])
-#             return True
-#         except Order.DoesNotExist:
-#             return False
-
-#     try:
-#         if event_name == "payment.captured":
-#             p = (payload.get("payment") or {}).get("entity") or {}
-#             mark_paid_by_order_id(p.get("order_id"), p.get("id"))
-
-#         elif event_name == "payment_link.paid":
-#             pl = (payload.get("payment_link") or {}).get("entity") or {}
-#             pay = (payload.get("payment") or {}).get("entity") or {}
-
-#             # 1) reference_id => orderdb-<local_id>
-#             ref = pl.get("reference_id")
-#             if isinstance(ref, str) and ref.startswith("orderdb-"):
-#                 try:
-#                     local_id = int(ref.split("-", 1)[1])
-#                     matched = Order.objects.get(id=local_id)
-#                     if not matched.paid:
-#                         matched.paid = True
-#                         if pay.get("id"):
-#                             matched.razorpay_payment_id = pay["id"]
-#                         if pl.get("order_id"):
-#                             matched.razorpay_order_id = pl["order_id"]
-#                         matched.save(update_fields=["paid", "razorpay_payment_id", "razorpay_order_id"])
-#                 except Exception:
-#                     matched = None
-
-#             # 2) fallback: payment.order_id
-#             if matched is None:
-#                 mark_paid_by_order_id(pay.get("order_id"), pay.get("id"))
-
-#             # 3) fallback: payment_link.order_id
-#             if matched is None:
-#                 mark_paid_by_order_id(pl.get("order_id"), pay.get("id"))
-
-#             # 4) fallback: notes.local_rp_order
-#             if matched is None:
-#                 notes = pl.get("notes") or {}
-#                 if notes.get("local_rp_order"):
-#                     mark_paid_by_order_id(notes["local_rp_order"], pay.get("id"))
-
-#         # If we have a paid order, auto-allocate any linked booking
-#         if matched and matched.paid:
-#             try:
-#                 booking = getattr(matched, "booking", None)
-#                 if booking and booking.status != "CONFIRMED":
-#                     # If no pricing snapshot yet (order created without booking_id), compute now
-#                     if booking.pricing_total_inr is None:
-#                         total_inr, breakdown, guests_total = _compute_booking_pricing(matched.package, booking)
-#                         booking.pricing_total_inr = total_inr
-#                         booking.pricing_breakdown = breakdown
-#                         booking.guests = guests_total
-#                         booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
-
-#                     # IMPORTANT: do NOT validate against booking.unit_type here.
-#                     picks = allocate_units_for_booking(booking, pkg=matched.package)
-#                     _finalize_sightseeing_if_requested(booking)
-#                     # tiny breadcrumb for logs
-#                     try:
-#                         labels = [getattr(u, "label", u.id) for u in picks]
-#                         log.error = f"{log.error or ''} | allocated_units={labels}"
-#                     except Exception:
-#                         pass
-#             except Exception as alloc_err:
-#                 log.error = f"{log.error or ''} | allocate_err: {alloc_err}"
-
-#         # Success
-#         log.matched_order = matched
-#         log.processed_ok = True
-#         log.error = log.error or ""
-#         log.save(update_fields=["matched_order", "processed_ok", "error", "processed_at"])
-#         return HttpResponse("ok")
-
-#     except Exception as e:
-#         log.error = str(e)
-#         log.matched_order = matched
-#         log.save(update_fields=["error", "matched_order", "processed_at"])
-#         return HttpResponse("error", status=500)
 
 
 @csrf_exempt
@@ -2611,3 +2139,225 @@ def sightseeing_optin(request):
         b.sightseeing_requested_count = count
         b.save(update_fields=["sightseeing_opt_in_pending", "sightseeing_requested_count"])
         return Response({"ok": True, "pending": True, "requested_guests": count})
+
+
+def _frontend_origin(request):
+    """
+    Best-effort frontend origin.
+    Override in settings with FRONTEND_ORIGIN = "https://your-frontend.com"
+    """
+    cfg = getattr(settings, "FRONTEND_ORIGIN", "").strip().rstrip("/")
+    if cfg:
+        return cfg
+    return (request.headers.get("Origin") or f"{'https' if request.is_secure() else 'http'}://{request.get_host()}").rstrip("/")
+
+# def _payment_redirect_url(request, status: str, order: Order | None, reason: str | None = None) -> str:
+#     """
+#     Build a clean redirect URL for FE.
+#     Optional settings:
+#       PAYMENT_SUCCESS_PATH = "/payment/success"
+#       PAYMENT_FAILED_PATH  = "/payment/failed"
+#     """
+#     base = _frontend_origin(request)
+#     success_path = getattr(settings, "PAYMENT_SUCCESS_PATH", "/payment/success")
+#     failed_path  = getattr(settings, "PAYMENT_FAILED_PATH",  "/payment/failed")
+#     path = success_path if status == "success" else failed_path
+#     qs = {"status": status}
+#     if order:
+#         qs.update({
+#             "order_id": order.id,
+#             "rp_order_id": order.razorpay_order_id or "",
+#             "rp_payment_id": getattr(order, "razorpay_payment_id", "") or "",
+#         })
+#     if reason:
+#         qs["reason"] = reason
+#     return f"{base}{path}?{urlencode(qs)}"
+
+
+def _payment_redirect_url(request, status: str, order: Order | None, reason: str | None = None) -> str:
+    """
+    Decide where to send the browser after callback.
+    Priority:
+      1) ?return_to=... passed in callback URL (set during create_order)
+      2) settings.PAYMENT_SUCCESS_URL / PAYMENT_FAILED_URL
+      3) "/"
+    Always appends: payment, oid, booking_id, reason (if any).
+    """
+    params = request.GET if request.method == "GET" else request.POST
+    return_to = params.get("return_to")
+
+    if status == "success":
+        base = return_to or getattr(settings, "PAYMENT_SUCCESS_URL", None) or "/"
+    else:
+        base = return_to or getattr(settings, "PAYMENT_FAILED_URL", None) or "/"
+
+    payload = {
+        "payment": status,
+        "oid": getattr(order, "id", None),
+        "booking_id": getattr(getattr(order, "booking", None), "id", None),
+    }
+    if reason and status != "success":
+        payload["reason"] = reason
+
+    return _append_params(base, payload)
+
+
+def _append_params(url, extra: dict) -> str:
+    parts = list(urlparse(url))
+    q = dict(parse_qsl(parts[4]))
+    q.update({k: v for k, v in extra.items() if v is not None})
+    parts[4] = urlencode(q)
+    return urlunparse(parts)
+
+
+
+from .models import Order, Booking  # adjust if your paths differ
+
+def _verify_plink_callback_sig(secret, pl_id, ref_id, status, payment_id, given_sig):
+    """Razorpay Payment Link callback signature:
+       HMAC_SHA256(pl_id|ref_id|status|payment_id, secret)
+    """
+    try:
+        payload = "|".join([
+            pl_id or "",
+            ref_id or "",
+            status or "",
+            payment_id or "",
+        ]).encode("utf-8")
+        expected = hmac.new((secret or "").encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, (given_sig or ""))
+    except Exception:
+        return False
+
+
+@csrf_exempt
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+def razorpay_callback(request):
+    """
+    Razorpay redirects the browser here after hosted checkout / payment link.
+    We DO NOT trust the callback to reconcile money — webhook remains source of truth.
+    Here we:
+      • log what we got
+      • try a best-effort mark-paid (idempotent)
+      • bounce the user back to FE success/failure with query params
+    """
+    # collect params from GET/POST
+    params = {}
+    try: params.update(request.GET.dict())
+    except Exception: pass
+    try:
+        if hasattr(request, "data"): params.update(dict(request.data))
+        else: params.update(request.POST.dict())
+    except Exception: pass
+
+    rp_order_id   = params.get("razorpay_order_id") or params.get("order_id")
+    rp_payment_id = params.get("razorpay_payment_id") or params.get("payment_id")
+    rp_signature  = params.get("razorpay_signature")
+    link_status   = (params.get("razorpay_link_status") or params.get("razorpay_payment_link_status") or params.get("status") or "").lower()
+
+    # optional helper we attached as ?oid=...
+    try:
+        local_oid = int(params.get("oid") or 0) or None
+    except Exception:
+        local_oid = None
+
+    # observability
+    try:
+        WebhookEvent.objects.create(
+            provider="razorpay", event="callback",
+            signature=rp_signature or "",
+            remote_addr=request.META.get("REMOTE_ADDR"),
+            payload=params,
+            raw_body=(request.body.decode("utf-8", errors="replace") if request.body else ""),
+            processed_ok=False,
+        )
+    except Exception:
+        pass
+
+    # locate local order
+    o = None
+    if rp_order_id:
+        o = Order.objects.select_related("booking", "package").filter(razorpay_order_id=rp_order_id).first()
+    if o is None and local_oid:
+        o = Order.objects.select_related("booking", "package").filter(id=local_oid).first()
+    if o is None:
+        return HttpResponseRedirect(_payment_redirect_url(request, "failed", None, reason="order_not_found"))
+
+    # verify signature if present (Checkout.js)
+    verified = False
+    verify_error = None
+    if rp_order_id and rp_payment_id and rp_signature:
+        try:
+            sign_str = f"{rp_order_id}|{rp_payment_id}"
+            expected = hmac.new(
+                getattr(settings, "RAZORPAY_KEY_SECRET").encode(),
+                sign_str.encode(), hashlib.sha256
+            ).hexdigest()
+            verified = hmac.compare_digest(expected, rp_signature)
+            if not verified:
+                verify_error = "bad_signature"
+        except Exception as e:
+            verify_error = f"verify_error:{e}"
+
+    # some Payment Link flows only give link_status=paid → treat as success-like
+    success_like = bool(verified or (link_status == "paid"))
+
+    if success_like:
+        # best-effort mark paid (webhook will also reconcile)
+        try:
+            changed = False
+            if not o.paid:
+                o.paid = True
+                changed = True
+            if rp_payment_id and o.razorpay_payment_id != rp_payment_id:
+                o.razorpay_payment_id = rp_payment_id
+                changed = True
+            if changed:
+                o.save(update_fields=["paid", "razorpay_payment_id"])
+        except Exception:
+            pass
+
+        # optional: light allocation (webhook also runs allocator)
+        try:
+            b = getattr(o, "booking", None)
+            if b and b.status != "CONFIRMED":
+                if b.pricing_total_inr is None:
+                    total, breakdown, guests_total = _compute_booking_pricing(o.package, b)
+                    b.pricing_total_inr = total
+                    b.pricing_breakdown = breakdown
+                    b.guests = guests_total
+                    b.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
+                allocate_units_for_booking(b, pkg=o.package)
+                _finalize_sightseeing_if_requested(b)
+        except Exception:
+            pass
+
+        return HttpResponseRedirect(_payment_redirect_url(request, "success", o))
+
+    # failure/unverifiable
+    reason = verify_error or (link_status or "unknown")
+    return HttpResponseRedirect(_payment_redirect_url(request, "failed", o, reason=reason))
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def order_status(request):
+    oid = request.GET.get("oid")
+    if not oid:
+        return Response({"error": "missing oid"}, status=400)
+    try:
+        o = Order.objects.select_related("booking").get(id=oid)
+    except Order.DoesNotExist:
+        return Response({"error": "not found"}, status=404)
+
+    # Webhook should set o.paid=True, o.razorpay_payment_id, and o.booking link.
+    return Response({
+        "id": o.id,
+        "paid": bool(getattr(o, "paid", False)),
+        "booking_id": getattr(o.booking, "id", None) if hasattr(o, "booking") else getattr(o, "booking_id", None),
+        "razorpay_order_id": o.razorpay_order_id,
+        "payment_id": getattr(o, "razorpay_payment_id", None),
+        "amount_inr": int((o.amount or 0) // 100),
+        "status": getattr(o, "status", "created"),
+    })

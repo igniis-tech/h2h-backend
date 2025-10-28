@@ -19,4 +19,6 @@ urlpatterns = [
     path("tickets/booking/<int:booking_id>.pdf", views.ticket_pdf_by_booking_id, name="ticket_pdf_by_booking_id"),
     path("auth/logout", views.logout_view, name="logout"),
     path("auth/sso/login", views.login_redirect, name="auth-login"),
+    path("payments/razorpay/callback/", views.razorpay_callback, name="razorpay_callback"),
+    path("orders/status", views.order_status, name="order_status"),
 ]
