@@ -1,62 +1,226 @@
+# import os
+# from pathlib import Path
+# from dotenv import load_dotenv
+# import dj_database_url
+# import os
+# from dotenv import load_dotenv
+# import re
+# BASE_DIR = Path(__file__).resolve().parent.parent
+
+# # Optional for local dev; harmless on Vercel (it won't read local .env)
+# load_dotenv(BASE_DIR / ".env")
+
+# # ---- Core ----
+# SECRET_KEY = 'django-insecure-#o*1r_%m6d$ofi^h%*r-_lmt6hi2(rucujd9=)d-g*sfnu@kpy'
+# DEBUG = True
+# DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+# ALLOWED_HOSTS = [
+#     "localhost",
+#     "127.0.0.1",
+#     ".vercel.app",
+#     "h2h-backend-vpk9.vercel.app",
+#     "h2h-frontend-new-ta3o.vercel.app",
+# ]
+# CORS_ALLOW_CREDENTIALS = True
+# # If you POST from the Vercel domain, add it to CSRF trusted origins
+# CSRF_TRUSTED_ORIGINS = [
+#     "http://localhost:5173",
+#     "http://127.0.0.1:5173",
+#     "https://h2h-frontend-new-ta3o.vercel.app",
+#     "https://h2h-backend-vpk9.vercel.app",
+# ]
+# CORS_ALLOW_HEADERS = [
+#     "accept",
+#     "accept-language",
+#     "content-type",
+#     "x-csrftoken",
+#     "x-requested-with",
+#     "authorization",
+# ]
+
+# # ----- CSRF -----
+# CSRF_TRUSTED_ORIGINS = [
+#     "http://localhost:5173",
+#     "http://127.0.0.1:5173",
+#     "https://h2h-backend-vpk9.vercel.app",
+#     "https://h2h-frontend-new-ta3o.vercel.app",
+# ]
+
+# # Keep cookies usable in local HTTP
+# # SESSION_COOKIE_SAMESITE = "Lax"
+# # CSRF_COOKIE_SAMESITE = "Lax"
+# # SESSION_COOKIE_SECURE = False
+# # CSRF_COOKIE_SECURE = False
+
+# SESSION_COOKIE_SAMESITE = "None"
+# CSRF_COOKIE_SAMESITE = "None"
+# SESSION_COOKIE_SECURE = True
+# CSRF_COOKIE_SECURE = True
+
+# # ---- Apps ----
+# INSTALLED_APPS = [
+#     "django.contrib.admin",
+#     "django.contrib.auth",
+#     "django.contrib.contenttypes",
+#     "django.contrib.sessions",
+#     "django.contrib.messages",
+#     "django.contrib.staticfiles",
+#     "rest_framework",
+#     "corsheaders",
+#     "h2h",
+# ]
+
+# MIDDLEWARE = [
+#     "django.middleware.security.SecurityMiddleware",
+#     "django.contrib.sessions.middleware.SessionMiddleware",
+#     "whitenoise.middleware.WhiteNoiseMiddleware",
+#     "corsheaders.middleware.CorsMiddleware",
+#     "django.middleware.common.CommonMiddleware",
+#     "django.middleware.csrf.CsrfViewMiddleware",
+#     "django.contrib.auth.middleware.AuthenticationMiddleware",
+#     "django.contrib.messages.middleware.MessageMiddleware",
+#     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+# ]
+
+# ROOT_URLCONF = "config.urls"
+
+# TEMPLATES = [
+#     {
+#         "BACKEND": "django.template.backends.django.DjangoTemplates",
+#         "DIRS": [BASE_DIR / "templates"],
+#         "APP_DIRS": True,
+#         "OPTIONS": {
+#             "context_processors": [
+#                 "django.template.context_processors.debug",
+#                 "django.template.context_processors.request",
+#                 "django.contrib.auth.context_processors.auth",
+#                 "django.contrib.messages.context_processors.messages",
+#             ],
+#         },
+#     },
+# ]
+
+# WSGI_APPLICATION = "config.wsgi.application"
+# ASGI_APPLICATION = "config.asgi.application"
+
+# # ---- DB ----
+# if DATABASE_URL:
+#     # Use pooled connection for serverless if you set a pooled URL
+#     DATABASES = {
+#         "default": dj_database_url.parse(
+#             DATABASE_URL,
+#             conn_max_age=600,      # good pooling for serverless
+#             ssl_require=True       # Supabase requires SSL
+#         )
+#     }
+# else:
+#     # local/dev fallback with SQLite
+#     from pathlib import Path
+#     BASE_DIR = Path(__file__).resolve().parent.parent
+#     DATABASES = {
+#         "default": {
+#             "ENGINE": "django.db.backends.sqlite3",
+#             "NAME": BASE_DIR / "db.sqlite3",
+#         }
+#     }
+
+# AUTH_PASSWORD_VALIDATORS = []
+
+# # ---- I18N/Timezone ----
+# LANGUAGE_CODE = "en-us"
+# TIME_ZONE = "Asia/Kolkata"
+# USE_I18N = True
+# USE_TZ = True
+
+# # ---- Static ----
+# STATIC_URL = "/static/"
+# STATIC_ROOT = BASE_DIR / "staticfiles"
+# STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# STATICFILES_DIRS = [BASE_DIR / "static"]
+# # ---- CORS ----
+# # If you have a frontend domain, add it here (comma-separated via env still works locally)
+# _env_cors = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# _default_cors = [
+#     "https://h2h-frontend-new-ta3o.vercel.app",  # deployed frontend
+#     "http://localhost:5173",                     # local dev
+#     "http://127.0.0.1:5173",
+# ]
+# # de-duplicate while preserving order
+# seen = set()
+# CORS_ALLOWED_ORIGINS = [x for x in (_default_cors + _env_cors) if not (x in seen or seen.add(x))]
+# CORS_ALLOW_CREDENTIALS = True
+
+# # allow all Vercel preview URLs too
+# CORS_ALLOWED_ORIGIN_REGEXES = [
+#     r"^https://.*\.vercel\.app$",
+# ]
+
+# # ---- DRF ----
+# REST_FRAMEWORK = {
+#     "DEFAULT_AUTHENTICATION_CLASSES": [
+#         "rest_framework.authentication.SessionAuthentication",
+#     ],
+#     "DEFAULT_PERMISSION_CLASSES": [
+#         "rest_framework.permissions.AllowAny",
+#     ],
+# }
+
+# # ---- Cognito (still via env so you can rotate secrets without code changes) ----
+# COGNITO = {
+#     "REGION": os.getenv("COGNITO_REGION"),
+#     "DOMAIN": os.getenv("COGNITO_DOMAIN"),
+#     "USER_POOL_ID": os.getenv("COGNITO_USER_POOL_ID"),
+#     "CLIENT_ID": os.getenv("COGNITO_APP_CLIENT_ID"),
+#     "CLIENT_SECRET": os.getenv("COGNITO_APP_CLIENT_SECRET"),
+#     "REDIRECT_URI": os.getenv("COGNITO_REDIRECT_URI"),
+#     "LOGOUT_REDIRECT_URI": os.getenv("COGNITO_LOGOUT_REDIRECT_URI"),
+#     "SCOPES": os.getenv("COGNITO_SCOPES", "openid email"),
+# }
+
+
+# PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "http://localhost:5173/register?payment=success")
+# PAYMENT_FAILED_URL  = os.getenv("PAYMENT_FAILED_URL",  "http://localhost:5173/register?payment=failed")
+# PAYMENT_RETURN_TO   = os.getenv("PAYMENT_RETURN_TO", "http://localhost:5173/register")
+
+# # ---- Razorpay (optional; leave blank until configured) ----
+# RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+# RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+# RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
+# settings.py
+
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 import dj_database_url
-import os
-from dotenv import load_dotenv
-import re
-BASE_DIR = Path(__file__).resolve().parent.parent
+import re  # keep
 
-# Optional for local dev; harmless on Vercel (it won't read local .env)
+BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # ---- Core ----
 SECRET_KEY = 'django-insecure-#o*1r_%m6d$ofi^h%*r-_lmt6hi2(rucujd9=)d-g*sfnu@kpy'
 DEBUG = True
+
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
-    ".vercel.app",
-    "h2h-backend-vpk9.vercel.app",
-    "h2h-frontend-new-ta3o.vercel.app",
-]
-CORS_ALLOW_CREDENTIALS = True
-# If you POST from the Vercel domain, add it to CSRF trusted origins
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://h2h-frontend-new-ta3o.vercel.app",
-    "https://h2h-backend-vpk9.vercel.app",
-]
-CORS_ALLOW_HEADERS = [
-    "accept",
-    "accept-language",
-    "content-type",
-    "x-csrftoken",
-    "x-requested-with",
-    "authorization",
+    "h2h-backend-vpk9.vercel.app",   # backend host
+    ".vercel.app",                   # allow vercel preview hosts (host header)
 ]
 
-# ----- CSRF -----
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://h2h-backend-vpk9.vercel.app",
-    "https://h2h-frontend-new-ta3o.vercel.app",
-]
+# --- Tell Django it's behind HTTPS on Vercel (CRITICAL for CSRF logic) ---
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
 
-# Keep cookies usable in local HTTP
-# SESSION_COOKIE_SAMESITE = "Lax"
-# CSRF_COOKIE_SAMESITE = "Lax"
-# SESSION_COOKIE_SECURE = False
-# CSRF_COOKIE_SECURE = False
-
+# ---- Cookies for cross-site (frontend <> backend on different subdomains) ----
 SESSION_COOKIE_SAMESITE = "None"
-CSRF_COOKIE_SAMESITE = "None"
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE   = "None"
+SESSION_COOKIE_SECURE   = True
+CSRF_COOKIE_SECURE      = True
+# default CSRF cookie name is 'csrftoken' (good for your FE). Do not set HttpOnly.
 
 # ---- Apps ----
 INSTALLED_APPS = [
@@ -71,11 +235,12 @@ INSTALLED_APPS = [
     "h2h",
 ]
 
+# ---- Middleware (Put CORS at the VERY TOP) ----
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",             # ⬅️ move to very top
     "django.middleware.security.SecurityMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -106,18 +271,14 @@ ASGI_APPLICATION = "config.asgi.application"
 
 # ---- DB ----
 if DATABASE_URL:
-    # Use pooled connection for serverless if you set a pooled URL
     DATABASES = {
         "default": dj_database_url.parse(
             DATABASE_URL,
-            conn_max_age=600,      # good pooling for serverless
-            ssl_require=True       # Supabase requires SSL
+            conn_max_age=600,
+            ssl_require=True,
         )
     }
 else:
-    # local/dev fallback with SQLite
-    from pathlib import Path
-    BASE_DIR = Path(__file__).resolve().parent.parent
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -138,35 +299,51 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 STATICFILES_DIRS = [BASE_DIR / "static"]
-# ---- CORS ----
-# If you have a frontend domain, add it here (comma-separated via env still works locally)
-_env_cors = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
-_default_cors = [
-    "https://h2h-frontend-new-ta3o.vercel.app",  # deployed frontend
-    "http://localhost:5173",                     # local dev
-    "http://127.0.0.1:5173",
-]
-# de-duplicate while preserving order
-seen = set()
-CORS_ALLOWED_ORIGINS = [x for x in (_default_cors + _env_cors) if not (x in seen or seen.add(x))]
-CORS_ALLOW_CREDENTIALS = True
 
-# allow all Vercel preview URLs too
+# ---- CORS ----
+# Exact FE origins you actually use:
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://h2h-frontend-new-ta3o.vercel.app",
+]
+# Allow all vercel previews (OPTIONS + actual)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",
+]
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-language",
+    "content-type",
+    "x-csrftoken",
+    "x-requested-with",
+    "origin",
+    "authorization",
+]
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+# ---- CSRF ----
+# Use ONE canonical list. Include FE origins & (optionally) wildcard for vercel.
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://h2h-frontend-new-ta3o.vercel.app",
+    "https://h2h-backend-vpk9.vercel.app",
+    "https://*.vercel.app",   # Django 4.2+ supports this
 ]
 
 # ---- DRF ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework.authentication.SessionAuthentication",  # CSRF applies to unsafe methods
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny",
     ],
 }
 
-# ---- Cognito (still via env so you can rotate secrets without code changes) ----
+# ---- Cognito (env-driven) ----
 COGNITO = {
     "REGION": os.getenv("COGNITO_REGION"),
     "DOMAIN": os.getenv("COGNITO_DOMAIN"),
@@ -178,12 +355,12 @@ COGNITO = {
     "SCOPES": os.getenv("COGNITO_SCOPES", "openid email"),
 }
 
-
+# ---- Payment return URLs ----
 PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "http://localhost:5173/register?payment=success")
 PAYMENT_FAILED_URL  = os.getenv("PAYMENT_FAILED_URL",  "http://localhost:5173/register?payment=failed")
-PAYMENT_RETURN_TO   = os.getenv("PAYMENT_RETURN_TO", "http://localhost:5173/register")
+PAYMENT_RETURN_TO   = os.getenv("PAYMENT_RETURN_TO",   "http://localhost:5173/register")
 
-# ---- Razorpay (optional; leave blank until configured) ----
+# ---- Razorpay ----
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
