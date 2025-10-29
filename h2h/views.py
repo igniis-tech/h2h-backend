@@ -729,7 +729,7 @@ def _compute_booking_pricing(package: Package, booking: Booking):
 ## version 4: create_order simplified to accept only booking_id
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+# @permission_classes([IsAuthenticated])
 def create_order(request):
     """
     Creates a Razorpay Order + Payment Link and returns the hosted checkout URL.
