@@ -3,7 +3,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import dj_database_url
 import os
-
+from dotenv import load_dotenv
+import re
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Optional for local dev; harmless on Vercel (it won't read local .env)
@@ -24,10 +25,10 @@ ALLOWED_HOSTS = [
 CORS_ALLOW_CREDENTIALS = True
 # If you POST from the Vercel domain, add it to CSRF trusted origins
 CSRF_TRUSTED_ORIGINS = [
-    "https://h2h-backend-vpk9.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "https://h2h-frontend-new-ta3o.vercel.app",
-    "http://127.0.0.1:5173/"
-
+    "https://h2h-backend-vpk9.vercel.app",
 ]
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -134,10 +135,21 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 # ---- CORS ----
 # If you have a frontend domain, add it here (comma-separated via env still works locally)
-CORS_ALLOWED_ORIGINS = [
-    *[o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_env_cors = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_default_cors = [
+    "https://h2h-frontend-new-ta3o.vercel.app",  # deployed frontend
+    "http://localhost:5173",                     # local dev
+    "http://127.0.0.1:5173",
 ]
+# de-duplicate while preserving order
+seen = set()
+CORS_ALLOWED_ORIGINS = [x for x in (_default_cors + _env_cors) if not (x in seen or seen.add(x))]
 CORS_ALLOW_CREDENTIALS = True
+
+# allow all Vercel preview URLs too
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.vercel\.app$",
+]
 
 # ---- DRF ----
 REST_FRAMEWORK = {
