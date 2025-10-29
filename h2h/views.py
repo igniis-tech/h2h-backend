@@ -113,11 +113,19 @@ def _finalize_sightseeing_if_requested(booking: Booking) -> tuple[bool, str]:
 # -----------------------------------
 # Health
 # -----------------------------------
+from django.middleware.csrf import get_token
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from django.views.decorators.csrf import ensure_csrf_cookie
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 @ensure_csrf_cookie
 def health(request):
-    return Response({"ok": True})
+    # sets the cookie AND returns the value so FE can send X-CSRFToken
+    return Response({"ok": True, "csrfToken": get_token(request)})
+
 
 def _allowed_utype_ids_for_package(pkg: Package) -> list[int]:
     # First try M2M; else fallback map by name
