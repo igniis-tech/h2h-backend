@@ -6,7 +6,6 @@ import json
 from datetime import date
 from django.utils import timezone as dj_timezone
 
-
 from django.conf import settings
 from django.http import HttpResponseBadRequest, HttpResponseNotFound, JsonResponse, HttpResponse
 from django.shortcuts import render
@@ -228,27 +227,41 @@ def sso_authorize(request):
     return Response({"authorization_url": url, "state": state, "provider": "cognito"})
 
 
+from django.conf import settings
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def sso_callback(request):
     code = request.GET.get("code")
     state = request.GET.get("state")
+    # use FE-provided redirect or fall back to settings
+    redirect_uri = (
+        request.GET.get("redirect_uri")
+        or getattr(settings, "COGNITO", {}).get("REDIRECT_URI")
+        or f"{request.headers.get('Origin') or f'http://{request.get_host()}'}".rstrip("/") + "/auth/callback"
+    )
+
     if not code:
         return Response({"error": "missing code"}, status=400)
+
     try:
-        tokens = exchange_code_for_tokens(code)
+        # IMPORTANT: redeem with the SAME redirect_uri used during authorize
+        tokens = exchange_code_for_tokens(code, redirect_uri=redirect_uri)
         access_token = tokens.get("access_token")
         if not access_token:
             return Response({"error": "no access_token"}, status=400)
+
         info = fetch_userinfo(access_token)
         user = get_or_create_user_from_userinfo(info)
         login(request, user)
+
         return Response(
             {
                 "user": UserSerializer(user).data,
                 "tokens": {k: v for k, v in tokens.items() if k in ("id_token", "access_token")},
                 "claims": info,
                 "state": state,
+                "redirect_uri_used": redirect_uri,
             }
         )
     except Exception as e:
