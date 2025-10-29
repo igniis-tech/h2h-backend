@@ -18,12 +18,14 @@ ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
     ".vercel.app",
-    "h2h-backend-vpk9.vercel.app",  # your deployment
+    "h2h-backend-vpk9.vercel.app",
+    "h2h-frontend-new-ta3o.vercel.app",
 ]
 CORS_ALLOW_CREDENTIALS = True
 # If you POST from the Vercel domain, add it to CSRF trusted origins
 CSRF_TRUSTED_ORIGINS = [
     "https://h2h-backend-vpk9.vercel.app",
+    "https://h2h-frontend-new-ta3o.vercel.app",
     "http://127.0.0.1:5173/"
 
 ]
@@ -41,6 +43,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://h2h-backend-vpk9.vercel.app",
+    "https://h2h-frontend-new-ta3o.vercel.app",
 ]
 
 # Keep cookies usable in local HTTP

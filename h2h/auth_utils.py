@@ -1,6 +1,8 @@
+
+# auth_utils.py
 import base64
 import json
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import requests
 from django.conf import settings
@@ -10,20 +12,21 @@ from django.core.exceptions import ImproperlyConfigured
 from .models import UserProfile
 
 
+# ----------------------------
+# Config helpers
+# ----------------------------
 def _cfg() -> dict:
     """
-    Lazy-read Cognito config so Django can start/migrate even if env vars aren’t set yet.
-    We only validate when an SSO function is actually called.
+    Lazy-read Cognito config so Django can start/migrate even if env vars
+    aren’t set yet. We validate only when a function is called.
     """
     cfg = getattr(settings, "COGNITO", {}) or {}
-    domain = (cfg.get("DOMAIN") or "").rstrip("/")
     return {
-        "DOMAIN": domain,
+        "DOMAIN": (cfg.get("DOMAIN") or "").strip().rstrip("/"),
         "CLIENT_ID": cfg.get("CLIENT_ID"),
-        "CLIENT_SECRET": cfg.get("CLIENT_SECRET"),
+        "CLIENT_SECRET": cfg.get("CLIENT_SECRET"),   # may be None (public client)
         "REDIRECT_URI": cfg.get("REDIRECT_URI"),
         "LOGOUT_REDIRECT_URI": cfg.get("LOGOUT_REDIRECT_URI") or cfg.get("REDIRECT_URI"),
-        # Ask for all common attributes by default; you can narrow via settings if needed.
         "SCOPES": cfg.get("SCOPES") or "openid email profile phone address",
     }
 
@@ -37,59 +40,127 @@ def _require(keys: list[str], cfg: dict):
         )
 
 
+def _domain_base(raw: str) -> str:
+    """
+    Normalize the Cognito domain to an absolute base URL with scheme
+    and no trailing slash.
+    """
+    d = (raw or "").strip().rstrip("/")
+    if not d:
+        raise ImproperlyConfigured("COGNITO.DOMAIN not configured")
+    if not d.startswith("http://") and not d.startswith("https://"):
+        d = "https://" + d
+    return d
+
+
 def _basic_auth_header(client_id: str, client_secret: str) -> str:
     token = f"{client_id}:{client_secret}".encode()
     return "Basic " + base64.b64encode(token).decode()
 
 
-def build_authorize_url(state: str) -> str:
+# ----------------------------
+# Authorization URL
+# ----------------------------
+def build_authorize_url(state: str, redirect_uri: str | None = None) -> str:
+    """
+    Build the hosted-UI authorize URL.
+    If redirect_uri is provided, it overrides settings.COGNITO.REDIRECT_URI.
+    """
     cfg = _cfg()
-    _require(["DOMAIN", "CLIENT_ID", "REDIRECT_URI"], cfg)
-    auth_url = f"https://{cfg['DOMAIN']}/oauth2/authorize"
+    _require(["DOMAIN", "CLIENT_ID"], cfg)
+    ru = (redirect_uri or cfg.get("REDIRECT_URI") or "").strip()
+    if not ru:
+        raise ImproperlyConfigured("COGNITO.REDIRECT_URI not configured and no redirect_uri provided")
+
+    base = _domain_base(cfg["DOMAIN"])
+    auth_url = f"{base}/oauth2/authorize"
     params = {
         "client_id": cfg["CLIENT_ID"],
         "response_type": "code",
         "scope": cfg["SCOPES"],
-        "redirect_uri": cfg["REDIRECT_URI"],
+        "redirect_uri": ru,
         "state": state or "",
     }
     return f"{auth_url}?{urlencode(params)}"
 
 
-def exchange_code_for_tokens(code: str):
+# ----------------------------
+# Token exchange
+# ----------------------------
+def exchange_code_for_tokens(
+    code: str,
+    *,
+    redirect_uri: str | None = None,
+    timeout: int = 15,
+) -> dict:
+    """
+    Redeem an authorization code with Cognito.
+    IMPORTANT: redirect_uri must MATCH the one used at /authorize.
+
+    Returns the JSON from Cognito (access_token, id_token, token_type,
+    expires_in, and possibly refresh_token).
+    """
     cfg = _cfg()
-    _require(["DOMAIN", "CLIENT_ID", "CLIENT_SECRET", "REDIRECT_URI"], cfg)
-    token_url = f"https://{cfg['DOMAIN']}/oauth2/token"
-    headers = {
-        "Authorization": _basic_auth_header(cfg["CLIENT_ID"], cfg["CLIENT_SECRET"]),
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
+    _require(["DOMAIN", "CLIENT_ID"], cfg)
+    ru = (redirect_uri or cfg.get("REDIRECT_URI") or "").strip()
+    if not ru:
+        raise ImproperlyConfigured("redirect_uri required (COGNITO.REDIRECT_URI or function arg)")
+
+    base = _domain_base(cfg["DOMAIN"])
+    token_url = f"{base}/oauth2/token"
+
     data = {
         "grant_type": "authorization_code",
         "client_id": cfg["CLIENT_ID"],
         "code": code,
-        "redirect_uri": cfg["REDIRECT_URI"],
+        "redirect_uri": ru,
     }
-    resp = requests.post(token_url, headers=headers, data=data, timeout=15)
-    resp.raise_for_status()
-    return resp.json()  # {access_token, id_token, refresh_token, ...}
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    # Use HTTP Basic only if a client secret is configured (confidential client).
+    if cfg.get("CLIENT_SECRET"):
+        headers["Authorization"] = _basic_auth_header(cfg["CLIENT_ID"], cfg["CLIENT_SECRET"])
+
+    resp = requests.post(token_url, headers=headers, data=data, timeout=timeout)
+
+    # Try to surface a helpful error from Cognito if non-200
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = None
+
+    if not resp.ok:
+        msg = None
+        if isinstance(payload, dict):
+            msg = payload.get("error_description") or payload.get("error")
+        msg = msg or f"OAuth token exchange failed (HTTP {resp.status_code})"
+        raise RuntimeError(msg)
+
+    return payload if isinstance(payload, dict) else resp.json()
 
 
-def fetch_userinfo(access_token: str):
+# ----------------------------
+# UserInfo
+# ----------------------------
+def fetch_userinfo(access_token: str, timeout: int = 15) -> dict:
     cfg = _cfg()
     _require(["DOMAIN"], cfg)
-    userinfo_url = f"https://{cfg['DOMAIN']}/oauth2/userInfo"
+    base = _domain_base(cfg["DOMAIN"])
+    userinfo_url = f"{base}/oauth2/userInfo"
     headers = {"Authorization": f"Bearer {access_token}"}
-    resp = requests.get(userinfo_url, headers=headers, timeout=15)
+    resp = requests.get(userinfo_url, headers=headers, timeout=timeout)
     resp.raise_for_status()
-    return resp.json()  # {sub, email, name, given_name, family_name, phone_number, address, ...}
+    return resp.json()
 
 
+# ----------------------------
+# Django user mapping
+# ----------------------------
 def get_or_create_user_from_userinfo(userinfo: dict) -> User:
     """
     Map Cognito OIDC claims into Django User + UserProfile.
-    Requires your App Client to grant READ for the attributes
-    and your OAuth scopes to include: openid email profile phone address.
+    Requires your app client to allow reading the attributes, and
+    scopes including: openid email profile phone address.
     """
     sub = userinfo.get("sub")
     if not sub:
@@ -134,12 +205,10 @@ def get_or_create_user_from_userinfo(userinfo: dict) -> User:
         user = User.objects.create(
             username=uname,
             email=email or "",
-            # Keep first/last optional; full_name is stored on profile
             first_name="",
             last_name="",
         )
     else:
-        # Ensure we keep email in sync if it was empty before
         if email and user.email != email:
             user.email = email
             user.save(update_fields=["email"])
@@ -158,42 +227,38 @@ def get_or_create_user_from_userinfo(userinfo: dict) -> User:
         },
     )
 
-    # Update existing profile fields if changed
     changed = False
     if not profile.cognito_sub:
-        profile.cognito_sub = sub
-        changed = True
+        profile.cognito_sub = sub; changed = True
     if profile.full_name != full_name:
-        profile.full_name = full_name
-        changed = True
+        profile.full_name = full_name; changed = True
     if profile.gender != gender:
-        profile.gender = gender
-        changed = True
+        profile.gender = gender; changed = True
     if profile.phone_number != phone_number:
-        profile.phone_number = phone_number
-        changed = True
+        profile.phone_number = phone_number; changed = True
     if profile.address != address_text:
-        profile.address = address_text
-        changed = True
+        profile.address = address_text; changed = True
     if profile.email_verified != email_verified:
-        profile.email_verified = email_verified
-        changed = True
+        profile.email_verified = email_verified; changed = True
     if profile.phone_number_verified != phone_number_verified:
-        profile.phone_number_verified = phone_number_verified
-        changed = True
+        profile.phone_number_verified = phone_number_verified; changed = True
     if changed:
         profile.save()
 
     return user
 
 
-def build_logout_url(id_token_hint: str | None = None) -> str:
+# ----------------------------
+# Logout URL
+# ----------------------------
+def build_logout_url(id_token_hint: str | None = None, logout_redirect_uri: str | None = None) -> str:
     cfg = _cfg()
     _require(["DOMAIN", "CLIENT_ID"], cfg)
-    logout_url = f"https://{cfg['DOMAIN']}/logout"
+    base = _domain_base(cfg["DOMAIN"])
+    logout_url = f"{base}/logout"
     params = {
         "client_id": cfg["CLIENT_ID"],
-        "logout_uri": cfg["LOGOUT_REDIRECT_URI"] or cfg["REDIRECT_URI"],
+        "logout_uri": (logout_redirect_uri or cfg["LOGOUT_REDIRECT_URI"] or cfg["REDIRECT_URI"]),
     }
     if id_token_hint:
         params["id_token_hint"] = id_token_hint
