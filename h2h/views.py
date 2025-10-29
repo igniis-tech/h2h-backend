@@ -5,7 +5,8 @@ import hashlib
 import json
 from datetime import date
 from django.utils import timezone as dj_timezone
-
+from rest_framework.decorators import authentication_classes
+from .auth_cognito import CognitoJWTAuthentication
 from django.conf import settings
 from django.http import HttpResponseBadRequest, HttpResponseNotFound, JsonResponse, HttpResponse
 from django.shortcuts import render
@@ -66,6 +67,7 @@ from .auth_utils import (
     exchange_code_for_tokens,
     fetch_userinfo,
     get_or_create_user_from_userinfo,
+    refresh_with_cognito,
 )
 from .pdf import build_invoice_and_pass_pdf_from_order
 from h2h import models
@@ -263,22 +265,28 @@ def sso_callback(request):
         user = get_or_create_user_from_userinfo(info)
         login(request, user)
 
-        return Response(
-            {
-                "user": UserSerializer(user).data,
-                "tokens": {k: v for k, v in tokens.items() if k in ("id_token", "access_token")},
-                "claims": info,
-                "state": state,
-                "redirect_uri_used": redirect_uri,
-            }
-        )
+        return Response({
+                "user": UserSerializer(user).data,      # optional convenience
+                "tokens": {
+                "access_token": tokens.get("access_token"),
+                "id_token": tokens.get("id_token"),
+                "expires_in": tokens.get("expires_in"),
+                "refresh_token": tokens.get("refresh_token"),  # present if allowed by your app client
+                "token_type": "Bearer",
+            },
+            "state": state,
+        })
     except Exception as e:
         return Response({"error": str(e)}, status=400)
 
 
 @api_view(["GET"])
+@authentication_classes([CognitoJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def me(request):
+    # defensive: should never get here anonymous, but keep a guard
+    if not getattr(request.user, "is_authenticated", False):
+        return Response({"detail": "Not authenticated"}, status=401)
     return Response(UserSerializer(request.user).data)
 
 
@@ -557,6 +565,7 @@ def _validate_package_vs_unit_type(package, unit_type):
 
 
 @api_view(["GET"])
+@authentication_classes([CognitoJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def my_bookings(request):
     """
@@ -729,7 +738,8 @@ def _compute_booking_pricing(package: Package, booking: Booking):
 ## version 4: create_order simplified to accept only booking_id
 
 @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
+@authentication_classes([CognitoJWTAuthentication])
+@permission_classes([AllowAny])
 def create_order(request):
     """
     Creates a Razorpay Order + Payment Link and returns the hosted checkout URL.
@@ -1487,7 +1497,8 @@ def _dbg(*args, **kwargs):
         pass
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([CognitoJWTAuthentication])
+@permission_classes([AllowAny])
 def create_booking(request):
     """
     Creates a booking WITHOUT requiring property_id or unit_type_id.
@@ -1799,7 +1810,8 @@ class PassthroughPDFRenderer(renderers.BaseRenderer):
 # ---------- Tickets (PDF) ----------
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([CognitoJWTAuthentication])
+@permission_classes([AllowAny])
 @renderer_classes([PassthroughPDFRenderer, renderers.JSONRenderer, renderers.BrowsableAPIRenderer])
 def ticket_pdf(request, razorpay_order_id: str):
     _dbg("TICKET:ENTRY",
@@ -1855,7 +1867,8 @@ def ticket_pdf(request, razorpay_order_id: str):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([CognitoJWTAuthentication])
+@permission_classes([AllowAny])
 @renderer_classes([PassthroughPDFRenderer, renderers.JSONRenderer, renderers.BrowsableAPIRenderer])
 def ticket_pdf_by_order_id(request, order_id: int):
     _dbg("TICKET:ENTRY_BY_ORDER_ID",
@@ -1904,7 +1917,7 @@ def ticket_pdf_by_order_id(request, order_id: int):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @renderer_classes([PassthroughPDFRenderer, renderers.JSONRenderer, renderers.BrowsableAPIRenderer])
 def ticket_pdf_by_booking_id(request, booking_id: int):
     _dbg("TICKET:ENTRY_BY_BOOKING_ID",
@@ -1984,7 +1997,7 @@ def _pretty_ticket_filename(order, *, kind="ORDER"):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])  # you may switch to AllowAny if you want idempotent logout
+@permission_classes([AllowAny])  # you may switch to AllowAny if you want idempotent logout
 def logout_view(request):
     """
     Server-side logout: clears the Django session.
@@ -2071,7 +2084,7 @@ def login_redirect(request):
 
 # views.py
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def sightseeing_optin(request):
     """
     Body:
@@ -2171,29 +2184,6 @@ def _frontend_origin(request):
     if cfg:
         return cfg
     return (request.headers.get("Origin") or f"{'https' if request.is_secure() else 'http'}://{request.get_host()}").rstrip("/")
-
-# def _payment_redirect_url(request, status: str, order: Order | None, reason: str | None = None) -> str:
-#     """
-#     Build a clean redirect URL for FE.
-#     Optional settings:
-#       PAYMENT_SUCCESS_PATH = "/payment/success"
-#       PAYMENT_FAILED_PATH  = "/payment/failed"
-#     """
-#     base = _frontend_origin(request)
-#     success_path = getattr(settings, "PAYMENT_SUCCESS_PATH", "/payment/success")
-#     failed_path  = getattr(settings, "PAYMENT_FAILED_PATH",  "/payment/failed")
-#     path = success_path if status == "success" else failed_path
-#     qs = {"status": status}
-#     if order:
-#         qs.update({
-#             "order_id": order.id,
-#             "rp_order_id": order.razorpay_order_id or "",
-#             "rp_payment_id": getattr(order, "razorpay_payment_id", "") or "",
-#         })
-#     if reason:
-#         qs["reason"] = reason
-#     return f"{base}{path}?{urlencode(qs)}"
-
 
 def _payment_redirect_url(request, status: str, order: Order | None, reason: str | None = None) -> str:
     """
@@ -2382,3 +2372,17 @@ def order_status(request):
         "amount_inr": int((o.amount or 0) // 100),
         "status": getattr(o, "status", "created"),
     })
+
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def oauth_refresh(request):
+    rt = (request.data.get("refresh_token") or "").strip()
+    if not rt:
+        return Response({"error": "refresh_token required"}, status=400)
+    try:
+        data = refresh_with_cognito(rt)
+        return Response(data)
+    except Exception as e:
+        return Response({"error": str(e)}, status=400)

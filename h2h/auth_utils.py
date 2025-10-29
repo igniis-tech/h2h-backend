@@ -10,6 +10,26 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ImproperlyConfigured
 
 from .models import UserProfile
+import requests
+from django.core.exceptions import ImproperlyConfigured
+
+def refresh_with_cognito(refresh_token: str, timeout: int = 15) -> dict:
+    cfg = _cfg()
+    base = _domain_base(cfg["DOMAIN"])
+    token_url = f"{base}/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "client_id": cfg["CLIENT_ID"],
+        "refresh_token": refresh_token,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if cfg.get("CLIENT_SECRET"):
+        headers["Authorization"] = _basic_auth_header(cfg["CLIENT_ID"], cfg["CLIENT_SECRET"])
+    resp = requests.post(token_url, headers=headers, data=data, timeout=timeout)
+    payload = resp.json() if resp.headers.get("content-type","").startswith("application/json") else None
+    if not resp.ok:
+        raise RuntimeError(payload.get("error_description") if isinstance(payload, dict) else f"HTTP {resp.status_code}")
+    return payload or {}
 
 
 # ----------------------------
@@ -263,3 +283,6 @@ def build_logout_url(id_token_hint: str | None = None, logout_redirect_uri: str 
     if id_token_hint:
         params["id_token_hint"] = id_token_hint
     return f"{logout_url}?{urlencode(params)}"
+
+
+
