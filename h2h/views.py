@@ -574,65 +574,6 @@ PACKAGE_UNITTYPE_MAP = {
     "swiss": {"SWISS TENT"},
     "tent": {"DOME TENT"},
 }
-def _canon_pkg_kind(package):
-    """Return 'room' | 'swiss' | 'tent' by fuzzy matching name/slug."""
-    s = f"{getattr(package, 'slug', '')} {getattr(package, 'name', '')}".lower()
-    s = re.sub(r"[^a-z ]+", " ", s)
-    if "swiss" in s:
-        return "swiss"
-    if "tent" in s or "dome" in s:
-        return "tent"
-    if any(k in s for k in ["room", "cottage", "hut"]):
-        return "room"
-    return None
-
-def _allowed_unit_types_for_package(package):
-    # Prefer M2M if configured
-    try:
-        qs = package.allowed_unit_types.all()
-        if qs.exists():
-            return {ut.name.upper() for ut in qs}
-    except Exception:
-        pass
-    # Fallback by fuzzy kind
-    kind = _canon_pkg_kind(package)
-    return PACKAGE_UNITTYPE_MAP.get(kind, set())
-
-def _get_allowed_unit_type_names(package):
-    names = []
-    try:
-        names = [u.name.upper() for u in package.allowed_unit_types.all()]
-    except Exception:
-        names = []
-    if names:
-        return names
-    kind = _canon_pkg_kind(package)
-    return [s.upper() for s in (PACKAGE_UNITTYPE_MAP.get(kind, []) or [])]
-
-
-def _link_booking_if_possible(matched, payload, event_name):
-    try:
-        b_id = None
-        if event_name == "payment_link.paid":
-            pl = (payload.get("payment_link") or {}).get("entity") or {}
-            b_id = (pl.get("notes") or {}).get("booking_id")
-            if not b_id:
-                pay = (payload.get("payment") or {}).get("entity") or {}
-                b_id = (pay.get("notes") or {}).get("booking_id")
-        elif event_name in ("payment.captured", "order.paid"):
-            pay = (payload.get("payment") or {}).get("entity") or {}
-            b_id = (pay.get("notes") or {}).get("booking_id")
-
-        if b_id and not hasattr(matched, "booking"):
-            from .models import Booking
-            b = Booking.objects.filter(id=int(b_id)).first()
-            if b and not b.order_id:
-                b.order = matched
-                b.save(update_fields=["order"])
-            return b
-    except Exception:
-        pass
-    return getattr(matched, "booking", None)
 
 
 def _allowed_unit_types_for_package(package: Package):
