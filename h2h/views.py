@@ -90,27 +90,93 @@ def api_docs(request):
     return render(request, "index.html", {"default_base": default_base})
 
 
+# def _finalize_sightseeing_if_requested(booking: Booking) -> tuple[bool, str]:
+#     """
+#     Create a SightseeingRegistration when user opted-in.
+#     Returns (created_bool, reason_str) for logging.
+#     """
+#     try:
+#         if not booking:
+#             return (False, "no_booking")
+#         if not getattr(booking, "sightseeing_opt_in", False):
+#             return (False, "opt_out")
+#         # idempotent
+#         if SightseeingRegistration.objects.filter(booking=booking).exists():
+#             return (False, "already_exists")
+#         SightseeingRegistration.objects.create(
+#             booking=booking,
+#             user=booking.user,
+#             guests=max(1, int(getattr(booking, "guests", 1) or 1)),
+#         )
+#         return (True, "created")
+#     except Exception as e:
+#         return (False, f"error:{e}")
+
+
 def _finalize_sightseeing_if_requested(booking: Booking) -> tuple[bool, str]:
     """
-    Create a SightseeingRegistration when user opted-in.
-    Returns (created_bool, reason_str) for logging.
+    Create/update SightseeingRegistration if user opted-in (pending or confirmed).
+    Returns (created_bool, reason_str).
+    Idempotent. Also clears the pending flag once finalized.
     """
     try:
         if not booking:
             return (False, "no_booking")
-        if not getattr(booking, "sightseeing_opt_in", False):
+
+        # Treat either 'opted in' or 'pending opted in' as intent to create
+        intent = bool(
+            getattr(booking, "sightseeing_opt_in", False)
+            or getattr(booking, "sightseeing_opt_in_pending", False)
+        )
+        if not intent:
             return (False, "opt_out")
-        # idempotent
-        if SightseeingRegistration.objects.filter(booking=booking).exists():
+
+        # desired guests: requested count > fallback to booking.guests >= 1
+        guests = int(
+            getattr(booking, "sightseeing_requested_count", 0)
+            or getattr(booking, "guests", 1)
+            or 1
+        )
+        guests = max(1, min(100, guests))
+
+        # if already exists → update & ensure CONFIRMED
+        if hasattr(booking, "sightseeing") and booking.sightseeing:
+            changed = False
+            if booking.sightseeing.guests != guests:
+                booking.sightseeing.guests = guests
+                changed = True
+            if booking.sightseeing.status != "CONFIRMED":
+                booking.sightseeing.status = "CONFIRMED"
+                changed = True
+            if changed:
+                booking.sightseeing.save(update_fields=["guests", "status"])
+
+            # clear pending + lock in the intent
+            if getattr(booking, "sightseeing_opt_in_pending", False) or not getattr(booking, "sightseeing_opt_in", False):
+                booking.sightseeing_opt_in = True
+                booking.sightseeing_opt_in_pending = False
+                booking.sightseeing_requested_count = guests
+                booking.save(update_fields=["sightseeing_opt_in", "sightseeing_opt_in_pending", "sightseeing_requested_count"])
             return (False, "already_exists")
+
+        # create fresh registration
         SightseeingRegistration.objects.create(
             booking=booking,
             user=booking.user,
-            guests=max(1, int(getattr(booking, "guests", 1) or 1)),
+            guests=guests,
+            pay_at_venue=True,
+            status="CONFIRMED",
         )
+        booking.sightseeing_opt_in = True
+        booking.sightseeing_opt_in_pending = False
+        booking.sightseeing_requested_count = guests
+        booking.save(update_fields=["sightseeing_opt_in", "sightseeing_opt_in_pending", "sightseeing_requested_count"])
         return (True, "created")
+
     except Exception as e:
         return (False, f"error:{e}")
+
+
 
 # -----------------------------------
 # Health
@@ -508,6 +574,66 @@ PACKAGE_UNITTYPE_MAP = {
     "swiss": {"SWISS TENT"},
     "tent": {"DOME TENT"},
 }
+def _canon_pkg_kind(package):
+    """Return 'room' | 'swiss' | 'tent' by fuzzy matching name/slug."""
+    s = f"{getattr(package, 'slug', '')} {getattr(package, 'name', '')}".lower()
+    s = re.sub(r"[^a-z ]+", " ", s)
+    if "swiss" in s:
+        return "swiss"
+    if "tent" in s or "dome" in s:
+        return "tent"
+    if any(k in s for k in ["room", "cottage", "hut"]):
+        return "room"
+    return None
+
+def _allowed_unit_types_for_package(package):
+    # Prefer M2M if configured
+    try:
+        qs = package.allowed_unit_types.all()
+        if qs.exists():
+            return {ut.name.upper() for ut in qs}
+    except Exception:
+        pass
+    # Fallback by fuzzy kind
+    kind = _canon_pkg_kind(package)
+    return PACKAGE_UNITTYPE_MAP.get(kind, set())
+
+def _get_allowed_unit_type_names(package):
+    names = []
+    try:
+        names = [u.name.upper() for u in package.allowed_unit_types.all()]
+    except Exception:
+        names = []
+    if names:
+        return names
+    kind = _canon_pkg_kind(package)
+    return [s.upper() for s in (PACKAGE_UNITTYPE_MAP.get(kind, []) or [])]
+
+
+def _link_booking_if_possible(matched, payload, event_name):
+    try:
+        b_id = None
+        if event_name == "payment_link.paid":
+            pl = (payload.get("payment_link") or {}).get("entity") or {}
+            b_id = (pl.get("notes") or {}).get("booking_id")
+            if not b_id:
+                pay = (payload.get("payment") or {}).get("entity") or {}
+                b_id = (pay.get("notes") or {}).get("booking_id")
+        elif event_name in ("payment.captured", "order.paid"):
+            pay = (payload.get("payment") or {}).get("entity") or {}
+            b_id = (pay.get("notes") or {}).get("booking_id")
+
+        if b_id and not hasattr(matched, "booking"):
+            from .models import Booking
+            b = Booking.objects.filter(id=int(b_id)).first()
+            if b and not b.order_id:
+                b.order = matched
+                b.save(update_fields=["order"])
+            return b
+    except Exception:
+        pass
+    return getattr(matched, "booking", None)
+
 
 def _allowed_unit_types_for_package(package: Package):
     # DB-driven mapping, if you later add M2M
@@ -2084,7 +2210,8 @@ def login_redirect(request):
 
 # views.py
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@authentication_classes([CognitoJWTAuthentication])
+@permission_classes([IsAuthenticated])
 def sightseeing_optin(request):
     """
     Body:
@@ -2143,6 +2270,11 @@ def sightseeing_optin(request):
         count = max(1, min(100, count))
     except Exception:
         count = max(1, int(b.guests or 1))
+    
+    b.sightseeing_opt_in = True
+    b.sightseeing_opt_in_pending = not (getattr(b, "order_id", None) and b.order.paid)
+    b.sightseeing_requested_count = count
+    b.save(update_fields=["sightseeing_opt_in", "sightseeing_opt_in_pending", "sightseeing_requested_count"])
 
     if getattr(b, "order_id", None) and b.order.paid:
         # payment done -> create immediately

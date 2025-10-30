@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.db import transaction
 from django.utils.text import slugify
 import csv, io, re
-
+import pkg_resources
 from django.db import models as dj_models
 from django.forms import Textarea
 from django.db.models import Prefetch
@@ -139,6 +139,7 @@ class BookingAdmin(admin.ModelAdmin):
     list_display = (
         "id", "user", "event", "property", "unit_type", "category",
         "guests",
+         "sightseeing_opt_in", "sightseeing_opt_in_pending", "sightseeing_requested_count",
         "primary_gender", "primary_meal_preference",   # ← NEW
         "party_brief",                                 # ← NEW (computed)
         "alloc_brief",                                 # ← NEW (computed)
@@ -148,7 +149,7 @@ class BookingAdmin(admin.ModelAdmin):
     )
     list_filter = (
         "event", "property", "unit_type", "category", "status",
-        "primary_gender", "primary_meal_preference",   # ← NEW
+        "primary_gender", "primary_meal_preference", "sightseeing_opt_in", "sightseeing_opt_in_pending",  # ← NEW
     )
     search_fields = (
         "id", "user__username", "user__email", "order__razorpay_order_id",

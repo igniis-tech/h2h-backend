@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, re_path
 from . import views
 
 urlpatterns = [
@@ -21,4 +21,5 @@ urlpatterns = [
     path("auth/sso/login", views.login_redirect, name="auth-login"),
     path("payments/razorpay/callback/", views.razorpay_callback, name="razorpay_callback"),
     path("orders/status", views.order_status, name="order_status"),
+    re_path(r"^sightseeing/optin/?$", views.sightseeing_optin, name="sightseeing_optin"),
 ]

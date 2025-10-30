@@ -289,6 +289,7 @@ class Booking(models.Model):
     
     sightseeing_opt_in_pending = models.BooleanField(default=False)
     sightseeing_requested_count = models.PositiveSmallIntegerField(default=0)
+    sightseeing_opt_in = models.BooleanField(default=False)
 
     # who & what
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
