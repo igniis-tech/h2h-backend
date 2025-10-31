@@ -585,9 +585,8 @@ def _allowed_unit_types_for_package(package: Package):
                 return {ut.name.upper() for ut in qs}
         except Exception:
             pass
-    # Fallback by name
-    key = (package.name or "").strip().lower()
-    return PACKAGE_UNITTYPE_MAP.get(key, set())
+    # No fallback by mutable name; require explicit M2M configuration
+    return set()
 
 # def _validate_package_vs_unit_type(package: Package, unit_type: UnitType):
 #     allowed = _allowed_unit_types_for_package(package)
@@ -834,6 +833,18 @@ def create_order(request):
             booking = Booking.objects.get(id=booking_id, user=request.user)
         except Booking.DoesNotExist:
             return Response({"error": "invalid booking_id"}, status=400)
+    else:
+        # Conservative fallback: if the user has exactly one pending booking without an order, use it
+        try:
+            cands = list(Booking.objects.filter(user=request.user,
+                                                status="PENDING_PAYMENT",
+                                                order__isnull=True).order_by("-created_at")[:2])
+            if len(cands) == 1:
+                booking = cands[0]
+                booking_id = booking.id
+                _dbg("CO_LINKED_UNIQUE_PENDING", booking_id=booking_id)
+        except Exception:
+            pass
 
         # if only one unit type allowed, auto-pin it for this booking
         try:
@@ -1805,11 +1816,61 @@ def razorpay_webhook(request):
             oent = (payload.get("order") or {}).get("entity") or {}
             mark_paid_by_order_id(oent.get("id"))
 
-        # If we have a paid order, auto-allocate any linked booking + sightseeing
+        # If we have a paid order, link booking (if possible) and auto-allocate
         if matched and matched.paid:
             try:
+                # Try to attach booking if not already linked, using notes.booking_id from payload
                 booking = getattr(matched, "booking", None)
+                _dbg("WH_LINK_START", order_id=getattr(matched, "id", None), has_booking=bool(booking))
+                if booking is None:
+                    notes_bid = None
+                    try:
+                        pl_ent = (payload.get("payment_link") or {}).get("entity") or {}
+                        notes_bid = notes_bid or (pl_ent.get("notes") or {}).get("booking_id")
+                    except Exception:
+                        pass
+                    try:
+                        pay_ent = (payload.get("payment") or {}).get("entity") or {}
+                        notes_bid = notes_bid or (pay_ent.get("notes") or {}).get("booking_id")
+                    except Exception:
+                        pass
+                    try:
+                        ord_ent = (payload.get("order") or {}).get("entity") or {}
+                        notes_bid = notes_bid or (ord_ent.get("notes") or {}).get("booking_id")
+                    except Exception:
+                        pass
+
+                    _dbg("WH_NOTES_BID", bid=notes_bid)
+                    if notes_bid:
+                        try:
+                            bid = int(str(notes_bid).strip())
+                            cand = Booking.objects.select_related("user").filter(id=bid).first()
+                            if cand and cand.order_id is None and cand.user_id == matched.user_id:
+                                cand.order = matched
+                                cand.save(update_fields=["order"])
+                                booking = cand
+                                _dbg("WH_LINKED_BY_NOTES", booking_id=cand.id)
+                        except Exception:
+                            pass
+
+                # If still no booking, fallback: a single pending booking for this user without an order
+                if booking is None:
+                    try:
+                        cands = list(Booking.objects.filter(user_id=matched.user_id,
+                                                            status="PENDING_PAYMENT",
+                                                            order__isnull=True).order_by("-created_at")[:2])
+                        _dbg("WH_FALLBACK_CANDS", count=len(cands))
+                        if len(cands) == 1:
+                            cands[0].order = matched
+                            cands[0].save(update_fields=["order"])
+                            booking = cands[0]
+                            _dbg("WH_LINKED_BY_FALLBACK", booking_id=booking.id)
+                    except Exception:
+                        pass
+
+                # proceed if we now have a booking and it's not already confirmed
                 if booking and booking.status != "CONFIRMED":
+                    _dbg("WH_ALLOC_START", booking_id=booking.id)
                     if booking.pricing_total_inr is None:
                         total_inr, breakdown, guests_total = _compute_booking_pricing(matched.package, booking)
                         booking.pricing_total_inr = total_inr
@@ -1835,6 +1896,7 @@ def razorpay_webhook(request):
 
             except Exception as alloc_err:
                 log.error = f"{(log.error or '')} | allocate_err: {alloc_err}"
+                _dbg("WH_ALLOC_ERR", err=str(alloc_err), order_id=getattr(matched, "id", None))
 
         # Success
         log.matched_order = matched
@@ -2405,6 +2467,18 @@ def razorpay_callback(request):
         # optional: light allocation (webhook also runs allocator)
         try:
             b = getattr(o, "booking", None)
+            if b is None:
+                # conservative fallback: link if the user has exactly one pending booking without an order
+                try:
+                    cands = list(Booking.objects.filter(user_id=o.user_id,
+                                                        status="PENDING_PAYMENT",
+                                                        order__isnull=True).order_by("-created_at")[:2])
+                    if len(cands) == 1:
+                        cands[0].order = o
+                        cands[0].save(update_fields=["order"])
+                        b = cands[0]
+                except Exception:
+                    pass
             if b and b.status != "CONFIRMED":
                 if b.pricing_total_inr is None:
                     total, breakdown, guests_total = _compute_booking_pricing(o.package, b)
@@ -2414,8 +2488,8 @@ def razorpay_callback(request):
                     b.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
                 allocate_units_for_booking(b, pkg=o.package)
                 _finalize_sightseeing_if_requested(b)
-        except Exception:
-            pass
+        except Exception as e:
+            _dbg("CALLBACK_ALLOC_ERR", err=str(e), order_id=o.id, rp_order_id=o.razorpay_order_id)
 
         return HttpResponseRedirect(_payment_redirect_url(request, "success", o))
 

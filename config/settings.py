@@ -312,7 +312,7 @@ CSRF_TRUSTED_ORIGINS = [
 # ---- DRF ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "h2h.auth_jwt.CognitoJWTAuthentication",  # ✅ use the JWT verifier
+        "h2h.auth_cognito.CognitoJWTAuthentication",  # ✅ softer auth: anon on missing/malformed tokens
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
 }
@@ -345,6 +345,7 @@ LOGGING = {
     "disable_existing_loggers": False,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "loggers": {
+        "h2h": {"handlers": ["console"], "level": "DEBUG"},
         "h2h.auth": {"handlers": ["console"], "level": "WARNING"},
         "django.request": {"handlers": ["console"], "level": "WARNING"},
     },
