@@ -372,7 +372,12 @@ class Allocation(models.Model):
     """
     booking = models.ForeignKey("Booking", on_delete=models.CASCADE, related_name="allocations")
     unit = models.ForeignKey(Unit, on_delete=models.PROTECT, related_name="allocations")
+    seats     = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def seats_used(self) -> int:
+        # when old rows have seats=0, count as full capacity
+        return self.seats or (self.unit.capacity or 1)
 
     class Meta:
         unique_together = (("booking", "unit"),)

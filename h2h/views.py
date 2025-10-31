@@ -20,6 +20,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from collections import defaultdict, Counter
 from rest_framework.response import Response
 from urllib.parse import parse_qsl, quote, urlparse, urlunparse
+from django.db.models import Sum, Case, When, F, IntegerField
 
 import secrets
 from urllib.parse import quote, urlencode
@@ -90,27 +91,41 @@ def api_docs(request):
     return render(request, "index.html", {"default_base": default_base})
 
 
-# def _finalize_sightseeing_if_requested(booking: Booking) -> tuple[bool, str]:
-#     """
-#     Create a SightseeingRegistration when user opted-in.
-#     Returns (created_bool, reason_str) for logging.
-#     """
-#     try:
-#         if not booking:
-#             return (False, "no_booking")
-#         if not getattr(booking, "sightseeing_opt_in", False):
-#             return (False, "opt_out")
-#         # idempotent
-#         if SightseeingRegistration.objects.filter(booking=booking).exists():
-#             return (False, "already_exists")
-#         SightseeingRegistration.objects.create(
-#             booking=booking,
-#             user=booking.user,
-#             guests=max(1, int(getattr(booking, "guests", 1) or 1)),
-#         )
-#         return (True, "created")
-#     except Exception as e:
-#         return (False, f"error:{e}")
+def _unit_free_seats_map(event, unit_ids=None):
+    base = Allocation.objects.filter(
+        booking__event=event,
+        booking__status__in=["PENDING_PAYMENT", "CONFIRMED"],
+    )
+    if unit_ids:
+        base = base.filter(unit_id__in=list(unit_ids))
+
+    used_rows = (base
+        .values("unit_id")
+        .annotate(used=Sum(Case(
+            When(seats__gt=0, then=F("seats")),
+            default=F("unit__capacity"),
+            output_field=IntegerField())))
+    )
+
+    caps = dict(Unit.objects.filter(
+        id__in=[r["unit_id"] for r in used_rows] if unit_ids is None else unit_ids
+    ).values_list("id", "capacity"))
+
+    free = {uid: caps.get(uid, 0) for uid in (caps.keys() if unit_ids is None else unit_ids)}
+    for r in used_rows:
+        uid = r["unit_id"]
+        free[uid] = max(0, (caps.get(uid, 0) or 0) - (r["used"] or 0))
+    return free
+
+def _fully_taken_unit_ids(event):
+    free = _unit_free_seats_map(event)
+    return [uid for uid, seats in free.items() if (seats or 0) <= 0]
+
+def _unit_is_shareable(u: Unit) -> bool:
+    cat = (u.category or "").strip().upper()
+    ut  = (getattr(u.unit_type, "code", "") or "").strip().upper()
+    return cat in {"DORMETORY"} or ut in {"DT", "ST"}
+    # return True  # <- if you want seat-sharing for ALL units
 
 
 def _finalize_sightseeing_if_requested(booking: Booking) -> tuple[bool, str]:
@@ -256,6 +271,8 @@ def _candidate_units_for_package(event: Event, pkg: Package, *, category: str | 
     """
     taken_ids = _units_taken_for_event(event).values_list("id", flat=True)
     qs = Unit.objects.all()
+
+    qs = qs.exclude(id__in=taken_ids).filter(status__in=["AVAILABLE","HOLD","OCCUPIED"])  
 
     # constrain by booking if specified
     if booking and booking.property_id:
@@ -1004,30 +1021,179 @@ def create_order(request):
 # Event-aware availability & allocation
 # -----------------------------------
 def _units_taken_for_event(event: Event):
-    """
-    Units already tied up for THIS event via allocations on pending/confirmed bookings.
-    """
-    taken = Allocation.objects.filter(
-        unit=OuterRef("pk"),
-        booking__event=event,
-        booking__status__in=["PENDING_PAYMENT", "CONFIRMED"],
-    )
-    return Unit.objects.annotate(is_taken=Exists(taken)).filter(is_taken=True)
+    """(Deprecated in seat-sharing) Kept only if other code expects it."""
+    # Return ONLY fully saturated units now:
+    full_ids = _fully_taken_unit_ids(event)
+    return Unit.objects.filter(id__in=full_ids)
+
+
+# @transaction.atomic
+# def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
+#     """
+#     Allocate concrete Unit(s) so that:
+#       - Eligibility constraint = unit.unit_type in package.allowed_unit_types (ONLY).
+#       - No category check; property/category are chosen automatically.
+#       - booking.property, booking.unit_type, booking.category are AUTO-FILLED from the picked unit(s).
+#       - We try to satisfy capacity within a single (property, unit_type) cluster if possible.
+
+#     Preference order:
+#       1) If booking.unit_type is already set and is allowed -> prefer that unit_type.
+#       2) If booking.property is set -> prefer that property within the chosen unit_type.
+#       3) Otherwise, pick any cluster that can satisfy capacity.
+#     """
+#     if not booking.event:
+#         raise ValueError("Booking missing event")
+
+#     pkg = pkg or (getattr(booking, "order", None) and booking.order.package)
+#     if not pkg:
+#         raise ValueError("Package context missing")
+
+#     needed = max(1, int(booking.guests or 1))
+
+#     # --- resolve allowed unit types for the package (M2M -> fallback by name, case-insensitive) ---
+#     try:
+#         allowed_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
+#     except Exception:
+#         allowed_ids = []
+#     if not allowed_ids:
+#         names = _allowed_unit_types_for_package(pkg) or set()
+#         if names:
+#             ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
+#             if not ids:
+#                 # case-insensitive fallback
+#                 ids = [ut.id for nm in names
+#                        for ut in [UnitType.objects.filter(name__iexact=nm).first()]
+#                        if ut]
+#             allowed_ids = ids
+#     if not allowed_ids:
+#         raise ValueError("Package has no allowed unit types configured")
+
+#     # If booking.unit_type is set and allowed, pin to it; otherwise ignore it.
+#     pinned_ut = booking.unit_type_id if (booking.unit_type_id in allowed_ids) else None
+
+#     taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
+#     qs = (Unit.objects
+#           .select_for_update()
+#           .filter(unit_type_id__in=([pinned_ut] if pinned_ut else allowed_ids),
+#                   status="AVAILABLE")
+#           .exclude(id__in=taken_ids))
+
+#     # (Optional) if booking.property is set, try that first by ordering
+#     # Order by: prefer same property (if any), then larger capacity to use fewer units
+#     if booking.property_id:
+#         qs = qs.order_by(
+#             # same property first
+#             models.Case(
+#                 models.When(property_id=booking.property_id, then=models.Value(0)),
+#                 default=models.Value(1),
+#                 output_field=models.IntegerField(),
+#             ),
+#             "-capacity", "property__name", "unit_type__name", "label"
+#         )
+#     else:
+#         qs = qs.order_by("-capacity", "property__name", "unit_type__name", "label")
+
+#     # >>> FIX: always build the pool, regardless of the branch above
+#     pool = list(qs)
+
+#     if not pool:
+#         raise ValueError("Insufficient capacity for requested guests")
+
+#     # --- gender counts for this booking (NOT relying on primary alone) ---
+#     gender_counts = _party_gender_counts(booking)
+#     total_needed = needed
+
+#     _dbg("ALLOC:GENDER_COUNTS", M=gender_counts['M'], F=gender_counts['F'], O=gender_counts['O'], total_needed=total_needed)
+
+#     # --- group units by (property, unit_type) for cluster-first attempt ---
+#     clusters = defaultdict(list)
+#     for u in pool:
+#         clusters[(u.property_id, u.unit_type_id)].append(u)
+
+#     def sort_units_desc(units):
+#         return sorted(
+#             units,
+#             key=lambda x: (-(x.capacity or 1),
+#                            getattr(x.property, "name", ""),
+#                            getattr(x.unit_type, "name", ""),
+#                            x.label)
+#         )
+
+#     def cluster_score(key):
+#         prop_id, ut_id = key
+#         score = 0
+#         if booking.property_id and prop_id == booking.property_id:
+#             score -= 2
+#         if pinned_ut and ut_id == pinned_ut:
+#             score -= 1
+#         return score
+
+#     picks: list[Unit] = []
+
+#     # --- Try single-cluster fit (prefer same property / pinned unit_type) ---
+#     for (prop_id, ut_id), units in sorted(clusters.items(), key=lambda kv: cluster_score(kv[0])):
+#         units_sorted = sort_units_desc(units)
+
+#         # Fast path: any single unit can host everyone -> ignore gender entirely
+#         single = next((u for u in units_sorted if (u.capacity or 1) >= total_needed), None)
+#         if single:
+#             picks = [single]
+#             booking.property_id = prop_id
+#             booking.unit_type_id = ut_id
+#             _dbg("ALLOC:CHOICE", mode="single_unit_cluster", property_id=prop_id, unit_type_id=ut_id, unit_id=single.id)
+#             break
+
+#         # Split path: pack by gender in this cluster
+#         assigned = _assign_units_by_gender(units_sorted, gender_counts)
+#         if assigned and sum((u.capacity or 1) for u in assigned) >= total_needed:
+#             picks = assigned
+#             booking.property_id = prop_id
+#             booking.unit_type_id = ut_id
+#             _dbg("ALLOC:CHOICE", mode="split_cluster_gendered", property_id=prop_id, unit_type_id=ut_id,
+#                  unit_ids=[u.id for u in assigned])
+#             break
+
+#     # --- Fallback: cross-cluster (global pool) ---
+#     if not picks:
+#         pool_sorted = sort_units_desc(pool)
+
+#         # Global single-unit fit?
+#         single = next((u for u in pool_sorted if (u.capacity or 1) >= total_needed), None)
+#         if single:
+#             picks = [single]
+#             booking.property = single.property
+#             booking.unit_type = single.unit_type
+#             _dbg("ALLOC:CHOICE", mode="single_unit_global", unit_id=single.id)
+#         else:
+#             assigned = _assign_units_by_gender(pool_sorted, gender_counts)
+#             if assigned and sum((u.capacity or 1) for u in assigned) >= total_needed:
+#                 picks = assigned
+#                 booking.property = picks[0].property
+#                 booking.unit_type = picks[0].unit_type
+#                 _dbg("ALLOC:CHOICE", mode="split_global_gendered", unit_ids=[u.id for u in assigned])
+
+#     if not picks or sum((u.capacity or 1) for u in picks) < total_needed:
+#         raise ValueError("Insufficient capacity respecting gender separation")
+
+#     # --- persist allocations, mark units, auto-fill category, status, dates ---
+#     for u in picks:
+#         Allocation.objects.create(booking=booking, unit=u)
+#         u.status = "OCCUPIED"
+#         u.save(update_fields=["status"])
+
+#     # keep category for the ticket (copied from chosen unit)
+#     booking.category = picks[0].category or (booking.category or "")
+#     booking.status = "CONFIRMED"
+#     if booking.event and (not booking.check_in or not booking.check_out):
+#         booking.check_in = booking.event.start_date
+#         booking.check_out = booking.event.end_date
+
+#     booking.save(update_fields=["property", "unit_type", "category", "status", "check_in", "check_out"])
+#     return picks
+
 
 @transaction.atomic
 def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
-    """
-    Allocate concrete Unit(s) so that:
-      - Eligibility constraint = unit.unit_type in package.allowed_unit_types (ONLY).
-      - No category check; property/category are chosen automatically.
-      - booking.property, booking.unit_type, booking.category are AUTO-FILLED from the picked unit(s).
-      - We try to satisfy capacity within a single (property, unit_type) cluster if possible.
-
-    Preference order:
-      1) If booking.unit_type is already set and is allowed -> prefer that unit_type.
-      2) If booking.property is set -> prefer that property within the chosen unit_type.
-      3) Otherwise, pick any cluster that can satisfy capacity.
-    """
     if not booking.event:
         raise ValueError("Booking missing event")
 
@@ -1037,7 +1203,7 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
 
     needed = max(1, int(booking.guests or 1))
 
-    # --- resolve allowed unit types for the package (M2M -> fallback by name, case-insensitive) ---
+    # --- resolve allowed unit types for the package (same as your code) ---
     try:
         allowed_ids = list(pkg.allowed_unit_types.values_list("id", flat=True))
     except Exception:
@@ -1047,29 +1213,21 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
         if names:
             ids = list(UnitType.objects.filter(name__in=names).values_list("id", flat=True))
             if not ids:
-                # case-insensitive fallback
-                ids = [ut.id for nm in names
-                       for ut in [UnitType.objects.filter(name__iexact=nm).first()]
-                       if ut]
+                ids = [ut.id for nm in names for ut in [UnitType.objects.filter(name__iexact=nm).first()] if ut]
             allowed_ids = ids
     if not allowed_ids:
         raise ValueError("Package has no allowed unit types configured")
 
-    # If booking.unit_type is set and allowed, pin to it; otherwise ignore it.
     pinned_ut = booking.unit_type_id if (booking.unit_type_id in allowed_ids) else None
 
-    taken_ids = set(_units_taken_for_event(booking.event).values_list("id", flat=True))
+    full_ids = set(_fully_taken_unit_ids(booking.event))
     qs = (Unit.objects
           .select_for_update()
-          .filter(unit_type_id__in=([pinned_ut] if pinned_ut else allowed_ids),
-                  status="AVAILABLE")
-          .exclude(id__in=taken_ids))
+          .filter(unit_type_id__in=([pinned_ut] if pinned_ut else allowed_ids))
+          .exclude(id__in=full_ids))
 
-    # (Optional) if booking.property is set, try that first by ordering
-    # Order by: prefer same property (if any), then larger capacity to use fewer units
     if booking.property_id:
         qs = qs.order_by(
-            # same property first
             models.Case(
                 models.When(property_id=booking.property_id, then=models.Value(0)),
                 default=models.Value(1),
@@ -1080,103 +1238,81 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
     else:
         qs = qs.order_by("-capacity", "property__name", "unit_type__name", "label")
 
-    # >>> FIX: always build the pool, regardless of the branch above
     pool = list(qs)
-
     if not pool:
         raise ValueError("Insufficient capacity for requested guests")
 
-    # --- gender counts for this booking (NOT relying on primary alone) ---
-    gender_counts = _party_gender_counts(booking)
-    total_needed = needed
+    # seat-aware sort: for shareable units, prefer ones with some occupants already
+    free_map = _unit_free_seats_map(booking.event, [u.id for u in pool])
+    def sort_key(u):
+        free = free_map.get(u.id, u.capacity or 1)
+        # shareable units with lower free seats first; then large capacity
+        shareable_bias = 0 if _unit_is_shareable(u) else 1  # prefer shareable
+        return (shareable_bias, free, -(u.capacity or 1), getattr(u.property, "name", ""), getattr(u.unit_type, "name", ""), u.label)
+    pool.sort(key=sort_key)
 
-    _dbg("ALLOC:GENDER_COUNTS", M=gender_counts['M'], F=gender_counts['F'], O=gender_counts['O'], total_needed=total_needed)
+    remaining = needed
+    created_allocs = []
 
-    # --- group units by (property, unit_type) for cluster-first attempt ---
-    clusters = defaultdict(list)
+    # Try to keep cluster preference (property/unit_type) similar to your logic
     for u in pool:
-        clusters[(u.property_id, u.unit_type_id)].append(u)
-
-    def sort_units_desc(units):
-        return sorted(
-            units,
-            key=lambda x: (-(x.capacity or 1),
-                           getattr(x.property, "name", ""),
-                           getattr(x.unit_type, "name", ""),
-                           x.label)
-        )
-
-    def cluster_score(key):
-        prop_id, ut_id = key
-        score = 0
-        if booking.property_id and prop_id == booking.property_id:
-            score -= 2
-        if pinned_ut and ut_id == pinned_ut:
-            score -= 1
-        return score
-
-    picks: list[Unit] = []
-
-    # --- Try single-cluster fit (prefer same property / pinned unit_type) ---
-    for (prop_id, ut_id), units in sorted(clusters.items(), key=lambda kv: cluster_score(kv[0])):
-        units_sorted = sort_units_desc(units)
-
-        # Fast path: any single unit can host everyone -> ignore gender entirely
-        single = next((u for u in units_sorted if (u.capacity or 1) >= total_needed), None)
-        if single:
-            picks = [single]
-            booking.property_id = prop_id
-            booking.unit_type_id = ut_id
-            _dbg("ALLOC:CHOICE", mode="single_unit_cluster", property_id=prop_id, unit_type_id=ut_id, unit_id=single.id)
+        if remaining <= 0:
             break
+        free = max(0, free_map.get(u.id, u.capacity or 1))
+        if free <= 0:
+            continue
 
-        # Split path: pack by gender in this cluster
-        assigned = _assign_units_by_gender(units_sorted, gender_counts)
-        if assigned and sum((u.capacity or 1) for u in assigned) >= total_needed:
-            picks = assigned
-            booking.property_id = prop_id
-            booking.unit_type_id = ut_id
-            _dbg("ALLOC:CHOICE", mode="split_cluster_gendered", property_id=prop_id, unit_type_id=ut_id,
-                 unit_ids=[u.id for u in assigned])
-            break
-
-    # --- Fallback: cross-cluster (global pool) ---
-    if not picks:
-        pool_sorted = sort_units_desc(pool)
-
-        # Global single-unit fit?
-        single = next((u for u in pool_sorted if (u.capacity or 1) >= total_needed), None)
-        if single:
-            picks = [single]
-            booking.property = single.property
-            booking.unit_type = single.unit_type
-            _dbg("ALLOC:CHOICE", mode="single_unit_global", unit_id=single.id)
+        if _unit_is_shareable(u):
+            take = min(free, remaining)
+            # partial-seat allocation
+            Allocation.objects.create(booking=booking, unit=u, seats=take)
+            free_map[u.id] = free - take
+            remaining -= take
+            created_allocs.append((u, take))
+            # flip to OCCUPIED only when fully used
+            if free_map[u.id] <= 0 and u.status != "OCCUPIED":
+                u.status = "OCCUPIED"
+                u.save(update_fields=["status"])
+            # set booking’s property/unit_type on first assignment
+            if not booking.property_id:
+                booking.property = u.property
+            if not booking.unit_type_id:
+                booking.unit_type = u.unit_type
         else:
-            assigned = _assign_units_by_gender(pool_sorted, gender_counts)
-            if assigned and sum((u.capacity or 1) for u in assigned) >= total_needed:
-                picks = assigned
-                booking.property = picks[0].property
-                booking.unit_type = picks[0].unit_type
-                _dbg("ALLOC:CHOICE", mode="split_global_gendered", unit_ids=[u.id for u in assigned])
+            # non-shareable → must consume the whole unit
+            take = (u.capacity or 1)
+            if take > remaining:
+                # if you want to *avoid* over-allocating non-shareables for solo guests,
+                # skip this unit and try next; else accept it to guarantee a room.
+                continue
+            Allocation.objects.create(booking=booking, unit=u, seats=0)  # 0 = whole unit
+            free_map[u.id] = 0
+            remaining -= take
+            created_allocs.append((u, take))
+            if u.status != "OCCUPIED":
+                u.status = "OCCUPIED"
+                u.save(update_fields=["status"])
+            if not booking.property_id:
+                booking.property = u.property
+            if not booking.unit_type_id:
+                booking.unit_type = u.unit_type
 
-    if not picks or sum((u.capacity or 1) for u in picks) < total_needed:
-        raise ValueError("Insufficient capacity respecting gender separation")
+    if remaining > 0:
+        raise ValueError("Insufficient capacity (seat-sharing)")
 
-    # --- persist allocations, mark units, auto-fill category, status, dates ---
-    for u in picks:
-        Allocation.objects.create(booking=booking, unit=u)
-        u.status = "OCCUPIED"
-        u.save(update_fields=["status"])
-
-    # keep category for the ticket (copied from chosen unit)
-    booking.category = picks[0].category or (booking.category or "")
+    # keep category for the ticket
+    first_u = created_allocs[0][0] if created_allocs else None
+    if first_u:
+        booking.category = first_u.category or (booking.category or "")
     booking.status = "CONFIRMED"
     if booking.event and (not booking.check_in or not booking.check_out):
         booking.check_in = booking.event.start_date
         booking.check_out = booking.event.end_date
-
     booking.save(update_fields=["property", "unit_type", "category", "status", "check_in", "check_out"])
-    return picks
+
+    return [u for (u, _) in created_allocs]
+
+
 
 # -----------------------------------
 # Inventory / Booking endpoints (EVENT-BASED)
