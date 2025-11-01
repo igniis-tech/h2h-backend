@@ -20,6 +20,7 @@ ALLOWED_HOSTS = [
     "h2h-backend-vpk9.vercel.app",
     ".vercel.app",
     "highwaytoheal.in"  # allow vercel preview hosts (Host header)
+    "highwaytohill.shop"
 ]
 
 # --- behind proxy / https ---
@@ -115,10 +116,12 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
     "https://h2h-frontend-new-ta3o.vercel.app",
     "https://highwaytoheal.in",
+    "https://www.highwaytohill.shop"
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",
     r"^https://.*\.highwaytoheal\.in$",
+    r"^https://.*\.highwaytohill\.shop$",
 ]
 CORS_ALLOW_CREDENTIALS = False
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
@@ -135,6 +138,7 @@ CSRF_TRUSTED_ORIGINS = [
     "https://h2h-backend-vpk9.vercel.app",
     "https://*.vercel.app",
     "https://highwaytoheal.in",
+    "https://www.highwaytohill.shop"
 ]
 
 # ---- DRF ----
