@@ -932,10 +932,30 @@ def create_order(request):
     except Exception as e:
         return Response({"error": "pricing_failed", "detail": str(e)}, status=400)
 
-    booking.pricing_total_inr = int(total_inr)
-    booking.pricing_breakdown = breakdown
+    # apply promo (if any and enabled for the package), then persist snapshot
+    promo = None
+    if getattr(package, "promo_active", True):
+        promo = getattr(booking, "promo_code", None)
+        if promo and not promo.is_live_today():
+            promo = None
+        if not promo:
+            code_raw = (request.data.get("promo_code") or "").strip()
+            if code_raw:
+                promo = _get_live_promocode(code_raw)
+
+    discount, final_after_promo, br = _apply_promocode(total_inr, promo)
+    charge_inr = int(final_after_promo)
+
+    bd = dict(breakdown or {})
+    if br:
+        bd["promo"] = br
+
+    booking.promo_discount_inr = int(discount) if br else None
+    booking.promo_breakdown = br
+    booking.pricing_total_inr = int(charge_inr)
+    booking.pricing_breakdown = bd
     booking.guests = guests_total
-    booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
+    booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests", "promo_discount_inr", "promo_breakdown"])
 
     # ---- convenience fee gross-up ----
     pass_platform_fee = request.data.get("pass_platform_fee")
@@ -947,9 +967,9 @@ def create_order(request):
     assume_method = (request.data.get("assume_method") or "").strip().lower()
     rate = RAZORPAY_UPI_FEE_RATE if assume_method == "upi" else RAZORPAY_PLATFORM_FEE_RATE
 
-    conv = _conv_fee_breakdown(total_inr, rate, RAZORPAY_PLATFORM_FEE_GST) if pass_platform_fee else None
+    conv = _conv_fee_breakdown(charge_inr, rate, RAZORPAY_PLATFORM_FEE_GST) if pass_platform_fee else None
     conv_fee_inr = int(conv["fee_inr"]) if conv else 0
-    gross_inr = int(conv["gross_total_inr"]) if conv else int(total_inr)
+    gross_inr = int(conv["gross_total_inr"]) if conv else int(charge_inr)
     amount_paise = gross_inr * 100
 
     # ---- Razorpay client ----
@@ -967,7 +987,7 @@ def create_order(request):
             "notes": {
                 "package": package.name,
                 "booking_id": str(booking_id or ""),
-                "base_amount_inr": str(total_inr),
+                "base_amount_inr": str(charge_inr),  # Use discounted amount
                 "convenience_fee_inr": str(conv_fee_inr),
                 "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
                 "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
@@ -1004,7 +1024,7 @@ def create_order(request):
                 "package": package.name,
                 "local_rp_order": rp_order["id"],
                 "booking_id": str(booking_id or ""),
-                "base_amount_inr": str(total_inr),
+                "base_amount_inr": str(charge_inr),  # Use discounted amount
                 "convenience_fee_inr": str(conv_fee_inr),
                 "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
                 "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
@@ -1062,7 +1082,7 @@ def create_order(request):
         "payment_link_meta": pl_meta,
         "callback_url": callback_abs,
         "pricing_snapshot": getattr(booking, "pricing_breakdown", None),
-        "base_amount_inr": int(total_inr),
+        "base_amount_inr": int(charge_inr),
         "convenience_fee_inr": int(conv_fee_inr),
         "gross_amount_inr": int(gross_inr),
         "convenience": ({"method": assume_method or "auto", **conv} if conv else None),

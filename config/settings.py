@@ -148,7 +148,7 @@ CSRF_TRUSTED_ORIGINS = [
 # ---- DRF ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "h2h.auth_cognito.CognitoJWTAuthentication",  # ✅ softer auth: anon on missing/malformed tokens
+        "h2h.auth_cognito.CognitoJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
 }
