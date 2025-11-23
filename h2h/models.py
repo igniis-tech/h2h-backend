@@ -67,6 +67,20 @@ class Package(models.Model):
 
 
 
+class PackageImage(models.Model):
+    package = models.ForeignKey(Package, on_delete=models.CASCADE, related_name="images")
+    image_url = models.URLField(max_length=500, help_text="Supabase public URL or signed URL for this image")
+    caption = models.CharField(max_length=200, blank=True, default="")
+    display_order = models.PositiveSmallIntegerField(default=0, help_text="Lower values appear first")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["display_order", "id"]
+
+    def __str__(self):
+        return f"{self.package.name} image #{self.display_order or 0}"
+
+
 class Order(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="orders")
     package = models.ForeignKey(Package, on_delete=models.PROTECT)

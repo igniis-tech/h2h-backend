@@ -387,7 +387,7 @@ def _invoice_qr_footer(c: canvas.Canvas, *, payload: str):
     text_right = tile_x - 4 * mm         # small gap from QR
     line1_y    = y0 + footer_h/2 + 3 * mm
     line2_y    = line1_y - 5 * mm
-    c.drawRightString(text_right, line1_y, "support@highwaytoheal.com")
+    c.drawRightString(text_right, line1_y, "support@highwaytoheal.in")
     c.drawRightString(text_right, line2_y, "+91 9836007110")
 
 

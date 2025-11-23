@@ -14,7 +14,7 @@ from django.forms import Textarea
 from django.db.models import Prefetch
 
 from .models import (
-    UserProfile, Package, Order, WebhookEvent,
+    UserProfile, Package, PackageImage, Order, WebhookEvent,
     Property, UnitType, Unit,
     Booking, Allocation,
     Event, EventDay,
@@ -45,6 +45,12 @@ class UserProfileAdmin(admin.ModelAdmin):
 
 
 # admin.py
+class PackageImageInline(admin.TabularInline):
+    model = PackageImage
+    extra = 1
+    fields = ("image_url", "caption", "display_order")
+
+
 @admin.register(Package)
 class PackageAdmin(admin.ModelAdmin):
     list_display = (
@@ -55,6 +61,8 @@ class PackageAdmin(admin.ModelAdmin):
     list_filter = ("active", "promo_active")
     search_fields = ("name",)
     filter_horizontal = ("allowed_unit_types",)
+
+    inlines = [PackageImageInline]
 
     fieldsets = (
         (None, {"fields": ("name", "description", "active", "promo_active")}),

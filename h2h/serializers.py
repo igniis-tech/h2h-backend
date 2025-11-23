@@ -2,7 +2,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import (
-    Package, Order, UserProfile,
+    Package, PackageImage, Order, UserProfile,
     Property, UnitType, Unit,
     Booking, Allocation,
     Event, EventDay,
@@ -41,8 +41,15 @@ class UnitTypeSerializer(serializers.ModelSerializer):
         
         
 # serializers.py
+class PackageImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PackageImage
+        fields = ["id", "image_url", "caption", "display_order"]
+
+
 class PackageSerializer(serializers.ModelSerializer):
     allowed_unit_types = UnitTypeSerializer(many=True, read_only=True)
+    images = PackageImageSerializer(many=True, read_only=True)
 
     class Meta:
         model = Package
@@ -50,6 +57,7 @@ class PackageSerializer(serializers.ModelSerializer):
             "id", "name", "description", "price_inr", "active",
             "promo_active",                 # <-- NEW
             "allowed_unit_types",
+            "images",
             "base_includes", "extra_price_adult_inr",
             "child_free_max_age", "child_half_max_age", "child_half_multiplier",
         ]
