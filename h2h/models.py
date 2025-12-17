@@ -82,8 +82,20 @@ class PackageImage(models.Model):
 
 
 class Order(models.Model):
+    PAYMENT_TYPE_CHOICES = (
+        ("FULL", "Full Payment"),
+        ("ADVANCE", "Advance Payment"),
+        ("BALANCE", "Balance Payment"),
+        ("REFUND", "Refund"),
+    )
+
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="orders")
     package = models.ForeignKey(Package, on_delete=models.PROTECT)
+    
+    # NEW link: Many orders (txns) -> One Booking
+    booking = models.ForeignKey("Booking", on_delete=models.CASCADE, related_name="orders", null=True, blank=True)
+    payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES, default="FULL")
+
     razorpay_order_id = models.CharField(max_length=128, unique=True)
     razorpay_payment_id = models.CharField(max_length=128, blank=True, null=True)
     razorpay_signature = models.CharField(max_length=256, blank=True, null=True)
@@ -93,7 +105,7 @@ class Order(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.razorpay_order_id} ({'PAID' if self.paid else 'UNPAID'})"
+        return f"{self.razorpay_order_id} ({'PAID' if self.paid else 'UNPAID'} - {self.payment_type})"
 
 
 class WebhookEvent(models.Model):
@@ -281,8 +293,15 @@ class Booking(models.Model):
     """
     STATUS = (
         ("PENDING_PAYMENT", "Pending Payment"),
-        ("CONFIRMED", "Confirmed"),
+        ("PARTIAL", "Partially Paid"),   # NEW
+        ("CONFIRMED", "Confirmed"),      # Fully paid or Enough for confirmation
         ("CANCELLED", "Cancelled"),
+    )
+    
+    PAYMENT_STATUS_CHOICES = (
+        ("PENDING", "Pending"),
+        ("PARTIAL", "Partially Paid"),
+        ("COMPLETED", "Completed"),
     )
     
     MEAL_CHOICES = [
@@ -299,7 +318,11 @@ class Booking(models.Model):
     promo_discount_inr = models.IntegerField(null=True, blank=True)
     promo_breakdown = models.JSONField(null=True, blank=True)
 
-    order = models.OneToOneField("Order", on_delete=models.CASCADE, related_name="booking", null=True, blank=True)
+    # REMOVED: order = OneToOneField(...) 
+    # Replaced by reverse relation `orders` from Order model
+    
+    amount_paid = models.IntegerField(default=0, help_text="Total INR paid so far (sum of successful orders)")
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default="PENDING")
     
     sightseeing_opt_in_pending = models.BooleanField(default=False)
     sightseeing_requested_count = models.PositiveSmallIntegerField(default=0)

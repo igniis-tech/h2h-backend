@@ -465,6 +465,8 @@ def _invoice_items_table(
     items: List[Dict[str, float]],
     taxes_fees: List[Dict[str, float]],
     grand_total_rupees: int,
+    paid_rupees: int = 0,
+    due_rupees: int = 0,
 ) -> float:
     """Items + taxes + grand total panel. Returns y below the block."""
     ensure_unicode_font()
@@ -497,18 +499,33 @@ def _invoice_items_table(
         c.setFillColor(TEXT)
         yy -= row_h
 
-    # Totals
-    # draw_h_rule(c, LEFT + INSET, yy - 2*mm, RIGHT - INSET)
-    # yy -= (GRID + 1.5*mm)
-    # c.setFillColor(ACCENT); c.setFont(_FONT_BOLD, 11.5)
-    # c.drawString(LEFT + INSET, yy, "GRAND TOTAL")
-    # c.drawRightString(RIGHT - INSET, yy, money(grand_total_rupees))
+    # Paid / Due (Moved ABOVE Grand Total)
+    if paid_rupees > 0 or due_rupees > 0:
+        c.setFont(_FONT_BODY, T_9)
+        if paid_rupees > 0:
+            c.setFillColor(_hex("#059669")) # Emerald-600
+            c.drawString(LEFT + INSET, yy, "Amount Paid")
+            c.drawRightString(RIGHT - INSET, yy, money(paid_rupees))
+            yy -= GRID
+        
+        if due_rupees > 0:
+            c.setFillColor(_hex("#E11D48")) # Rose-600
+            c.drawString(LEFT + INSET, yy, "Balance Due")
+            c.drawRightString(RIGHT - INSET, yy, money(due_rupees))
+            # Optional: Add note
+            yy -= GRID
+            c.setFillColor(MUTE); c.setFont(_FONT_BODY, T_8)
+            c.drawRightString(RIGHT - INSET, yy, "(Please pay pending amount at venue or via dashboard)")
     
+    # Divider/Rule for Total
     draw_h_rule(c, LEFT + INSET, yy - 2*mm, RIGHT - INSET)
-    yy -= 2*GRID   # was (GRID + 1.5*mm); 2*GRID = 8 mm if GRID = 4 mm
+    yy -= (GRID + 4) # Separation for Grand Total
+
+    # Grand Total
     c.setFillColor(ACCENT); c.setFont(_FONT_BOLD, 11.5)
     c.drawString(LEFT + INSET, yy, "GRAND TOTAL")
     c.drawRightString(RIGHT - INSET, yy, money(grand_total_rupees))
+
 
     # yy -= GRID
     # words = inr_to_words(int(grand_total_rupees)).upper()
@@ -1182,12 +1199,19 @@ def build_invoice_and_pass_pdf_from_order(
         taxes_fees.append({"label": "Convenience Fee", "amount": old_conv_inr})
 
     # Items block (grand total always from order)
+    # Calculate advanced/paid info
+    total_cost = int(booking.pricing_total_inr or 0)
+    amt_paid   = int(booking.amount_paid or 0)
+    amt_due    = max(0, total_cost - amt_paid)
+
     y_after_items = _invoice_items_table(
         c,
         y=y_after_header,
         items=items if items else [{"label": pkg_name, "amount": grand_total_rupees}],
         taxes_fees=taxes_fees,
-        grand_total_rupees=grand_total_rupees,
+        grand_total_rupees=total_cost, # Use TOTAL booking cost here, not just order amount
+        paid_rupees=amt_paid,
+        due_rupees=amt_due,
     )
 
     # Reserve footer QR: bottom_limit ensures nothing crosses into footer

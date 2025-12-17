@@ -76,12 +76,14 @@ class OrderSerializer(serializers.ModelSerializer):
             "razorpay_order_id",
             "razorpay_payment_id",
             "razorpay_signature",
+            "payment_type",    # NEW
             "amount",          # NOTE: in paise (as per model)
             "currency",
             "paid",
             "created_at",
         ]
         read_only_fields = [
+            "payment_type",
             "razorpay_order_id",
             "razorpay_payment_id",
             "razorpay_signature",
@@ -167,12 +169,15 @@ class BookingSerializer(serializers.ModelSerializer):
     unit_type = UnitTypeSerializer(read_only=True)
     event = EventSerializer(read_only=True)
     promo_code = PromoCodeSerializer(read_only=True)
-    order = OrderSerializer(read_only=True)  # show nested order summary to "attach every order with user"
+    promo_code = PromoCodeSerializer(read_only=True)
+    # order = OrderSerializer(read_only=True)  <-- REMOVED
+    orders = OrderSerializer(many=True, read_only=True) # <-- ADDED
 
     class Meta:
         model = Booking
         fields = [
-            "id", "order", "user", "event", "property", "unit_type", "category",
+            "id", "orders", "amount_paid", "payment_status", # <-- UPDATED
+            "user", "event", "property", "unit_type", "category",
             "check_in", "check_out", "guests",
             "companions",  # NEW
             "blood_group", "emergency_contact_name", "emergency_contact_phone",

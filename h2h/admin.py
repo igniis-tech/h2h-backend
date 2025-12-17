@@ -141,8 +141,17 @@ class PromoCodeAdmin(admin.ModelAdmin):
     
 
 
+
+class OrderInline(admin.TabularInline):
+    model = Order
+    extra = 0
+    fields = ("razorpay_order_id", "payment_type", "amount", "paid", "created_at")
+    readonly_fields = ("razorpay_order_id", "payment_type", "amount", "paid", "created_at")
+    can_delete = False
+
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
+    inlines = [OrderInline]
     # ------- List page -------
     list_display = (
         "id", "user", "event", "property", "unit_type", "category",
@@ -150,8 +159,9 @@ class BookingAdmin(admin.ModelAdmin):
          "sightseeing_opt_in", "sightseeing_opt_in_pending", "sightseeing_requested_count",
         "primary_gender", "primary_meal_preference",   # ← NEW
         "party_brief",                                 # ← NEW (computed)
+        "party_brief",                                 # ← NEW (computed)
         "alloc_brief",                                 # ← NEW (computed)
-        "pricing_total_inr", "status",
+        "pricing_total_inr", "amount_paid", "payment_status", "status",
         "promo_code", "promo_discount_inr",
         "created_at",
     )
@@ -160,7 +170,7 @@ class BookingAdmin(admin.ModelAdmin):
         "primary_gender", "primary_meal_preference", "sightseeing_opt_in", "sightseeing_opt_in_pending",  # ← NEW
     )
     search_fields = (
-        "id", "user__username", "user__email", "order__razorpay_order_id",
+        "id", "user__username", "user__email", "orders__razorpay_order_id",
     )
 
     # Make JSON fields easier to edit (simple textarea without extra deps)
@@ -175,7 +185,7 @@ class BookingAdmin(admin.ModelAdmin):
     )
 
     fieldsets = (
-        ("Core", {"fields": ("user", "event", "order", "status")}),
+        ("Core", {"fields": ("user", "event", "status", "payment_status", "amount_paid")}),
         ("Inventory Slice", {"fields": ("property", "unit_type", "category")}),
         ("Dates", {"fields": ("check_in", "check_out")}),
         ("Guests", {"fields": ("guests", "guest_ages", "extra_adults", "extra_children_half", "extra_children_free")}),
@@ -211,7 +221,7 @@ class BookingAdmin(admin.ModelAdmin):
                 rel_name,
                 queryset=Allocation.objects.select_related("unit__property", "unit__unit_type"),
             )
-        ).select_related("order", "event", "property", "unit_type", "user")
+        ).select_related("event", "property", "unit_type", "user").prefetch_related("orders")
     
     # def get_queryset(self, request):
     #     qs = super().get_queryset(request)

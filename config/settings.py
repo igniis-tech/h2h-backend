@@ -29,10 +29,11 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
 
 # ---- Cookies (stateless API; keep secure for previews) ----
-SESSION_COOKIE_SAMESITE = "None"
-CSRF_COOKIE_SAMESITE   = "None"
-SESSION_COOKIE_SECURE   = True
-CSRF_COOKIE_SECURE      = True
+# ---- Cookies (stateless API; keep secure for previews) ----
+SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
+CSRF_COOKIE_SAMESITE   = "None" if not DEBUG else "Lax"
+SESSION_COOKIE_SECURE   = not DEBUG
+CSRF_COOKIE_SECURE      = not DEBUG
 
 # ---- Apps ----
 INSTALLED_APPS = [
@@ -43,6 +44,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework.authtoken", # ✅ Add this
     "corsheaders",
     "h2h",
 ]
@@ -112,9 +114,11 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 
 # ---- CORS ----
+CORS_ORIGIN_ALLOW_ALL = False # Must be False for credentials
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:60311", 
     "https://h2h-frontend-new-ta3o.vercel.app",
     "https://highwaytoheal.in",
     "https://www.highwaytohill.shop",
@@ -123,10 +127,10 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",
     r"^https://.*\.highwaytoheal\.in$",
-    r"^https://.*\.highwaytohill\.shop$",
+    r"^https://.*\.highwaytohill.shop$",
     r"^https://.*\.highwaytoheal\.org$",
 ]
-CORS_ALLOW_CREDENTIALS = False
+CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "Authorization",   # ✅ ensure case-exact
@@ -148,6 +152,7 @@ CSRF_TRUSTED_ORIGINS = [
 # ---- DRF ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.TokenAuthentication",  # ✅ Add this
         "h2h.auth_cognito.CognitoJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],

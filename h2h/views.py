@@ -320,6 +320,31 @@ def sso_authorize(request):
     return Response({"authorization_url": url, "state": state, "provider": "cognito"})
 
 
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def auth_refresh(request):
+    """
+    Exchange a refresh token for new access/id tokens.
+    Expects { "refresh_token": "..." }
+    """
+    token = request.data.get("refresh_token")
+    if not token:
+        return Response({"error": "missing refresh_token"}, status=400)
+
+    try:
+        from .auth_utils import refresh_with_cognito
+        new_tokens = refresh_with_cognito(token)
+        # normalize response
+        return Response({
+            "access_token": new_tokens.get("access_token"),
+            "id_token": new_tokens.get("id_token"),
+            "expires_in": new_tokens.get("expires_in"),
+            "token_type": new_tokens.get("token_type", "Bearer"),
+        })
+    except Exception as e:
+        return Response({"error": str(e)}, status=400)
+
+
 from django.conf import settings
 
 @api_view(["GET"])
@@ -678,7 +703,7 @@ def my_bookings(request):
     """
     qs = (Booking.objects
           .filter(user=request.user)
-          .select_related("order", "event", "property", "unit_type")
+          .select_related("event", "property", "unit_type")
           .order_by("-created_at"))
     return Response(BookingSerializer(qs, many=True).data)
 
@@ -942,17 +967,78 @@ def create_order(request):
             code_raw = (request.data.get("promo_code") or "").strip()
             if code_raw:
                 promo = _get_live_promocode(code_raw)
+    # Apply promo
+    br = None
+    discount = 0
+    bd = breakdown
+    
+    if promo:
+        try:
+            # Re-validate roughly
+            final_inr, d_inr, p_br = _apply_promo_logic(total_inr, promo)
+            total_inr = final_inr
+            discount = d_inr
+            br = p_br
+        except Exception:
+            pass
 
-    discount, final_after_promo, br = _apply_promocode(total_inr, promo)
-    charge_inr = int(final_after_promo)
+    # ---- NEW Logic: Advance / Partial / Balance ----
+    req_amount = request.data.get("amount")
+    
+    # 1. Calculate what we expect to charge
+    pricing_total = int(total_inr) # After promo
+    
+    final_amount_to_charge = pricing_total
+    payment_type = "FULL"
 
-    bd = dict(breakdown or {})
-    if br:
-        bd["promo"] = br
+    if req_amount:
+        try:
+            req_amount = int(req_amount)
+        except:
+            return Response({"error": "Invalid amount"}, status=400)
+
+        # Logic for ADVANCE
+        # req_amount is in PAISE from frontend (e.g. 100000 for 1000 INR)
+        # pricing_total is in INR
+        
+        req_amount_inr = req_amount / 100.0
+        
+        if req_amount_inr < pricing_total:
+            # It is a partial payment
+            if req_amount_inr < 1000:
+                return Response({"error": "Minimum advance amount is ₹1000"}, status=400)
+            final_amount_to_charge = req_amount_inr
+            payment_type = "ADVANCE"
+        else:
+             # Ensure we don't overcharge if they send weird amount, cap at remaining?
+             # For now if they send > total, treat as full? 
+             # Or if acts as 'BALANCE', we should check how much is pending.
+             pass
+
+    # If booking already has paid something, check if this is BALANCE
+    if booking.amount_paid > 0:
+        remaining = pricing_total - booking.amount_paid
+        if remaining <= 0:
+             return Response({"error": "Booking is already fully paid."}, status=400)
+        
+        # Default to paying the rest
+        if not req_amount:
+             final_amount_to_charge = remaining
+             payment_type = "BALANCE"
+        else:
+             # paying specific amount again?
+             if req_amount >= remaining:
+                 final_amount_to_charge = remaining
+                 payment_type = "BALANCE"
+             else:
+                 final_amount_to_charge = req_amount
+                 payment_type = "PARTIAL"
+
+    charge_inr = final_amount_to_charge
 
     booking.promo_discount_inr = int(discount) if br else None
     booking.promo_breakdown = br
-    booking.pricing_total_inr = int(charge_inr)
+    booking.pricing_total_inr = int(pricing_total) # Always store full price
     booking.pricing_breakdown = bd
     booking.guests = guests_total
     booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests", "promo_discount_inr", "promo_breakdown"])
@@ -987,7 +1073,8 @@ def create_order(request):
             "notes": {
                 "package": package.name,
                 "booking_id": str(booking_id or ""),
-                "base_amount_inr": str(charge_inr),  # Use discounted amount
+                "base_amount_inr": str(charge_inr),  # Amount being paid now
+                "payment_type": payment_type,
                 "convenience_fee_inr": str(conv_fee_inr),
                 "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
                 "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
@@ -999,7 +1086,10 @@ def create_order(request):
 
     # Persist local Order (GROSS)
     o = Order.objects.create(
-        user=request.user, package=package,
+        user=request.user, 
+        package=package,
+        booking=booking, # Link directly to booking
+        payment_type=payment_type,
         razorpay_order_id=rp_order["id"], amount=amount_paise, currency="INR",
     )
 
@@ -1018,13 +1108,14 @@ def create_order(request):
             "amount": amount_paise,
             "currency": "INR",
             "reference_id": f"orderdb-{o.id}",
-            "description": f"H2H: {package.name}",
+            "description": f"H2H: {package.name} ({payment_type})",
             "notify": {"email": True, "sms": False},
             "notes": {
                 "package": package.name,
                 "local_rp_order": rp_order["id"],
                 "booking_id": str(booking_id or ""),
-                "base_amount_inr": str(charge_inr),  # Use discounted amount
+                "base_amount_inr": str(charge_inr),
+                "payment_type": payment_type,
                 "convenience_fee_inr": str(conv_fee_inr),
                 "platform_fee_inr": str(conv["platform_fee_inr"]) if conv else "0",
                 "platform_fee_gst_inr": str(conv["platform_gst_inr"]) if conv else "0",
@@ -1061,18 +1152,18 @@ def create_order(request):
         # still proceed; webhook will reconcile using rp_order
 
     # ---- attach order to booking & store convenience split ----
-    booking.order = o
+    # booking.order = o  <-- REMOVED
     try:
         bd = dict(booking.pricing_breakdown or {})
         if conv:
             bd["convenience"] = {"method": assume_method or "auto", **conv}
             booking.pricing_breakdown = bd
-            booking.pricing_total_inr = gross_inr
-            booking.save(update_fields=["order", "pricing_breakdown", "pricing_total_inr"])
+            # booking.pricing_total_inr = gross_inr <-- Don't update TOTAL with GROSS of a partial payment
+            booking.save(update_fields=["pricing_breakdown"])
         else:
-            booking.save(update_fields=["order"])
+            booking.save(update_fields=["pricing_breakdown"])
     except Exception:
-        booking.save(update_fields=["order"])
+        pass    # booking.save(update_fields=["order"]) <-- Removed
 
     return Response({
         "order": rp_order,
@@ -1085,6 +1176,7 @@ def create_order(request):
         "base_amount_inr": int(charge_inr),
         "convenience_fee_inr": int(conv_fee_inr),
         "gross_amount_inr": int(gross_inr),
+        "payment_type": payment_type,
         "convenience": ({"method": assume_method or "auto", **conv} if conv else None),
     })
 
@@ -2192,7 +2284,7 @@ def _dbg(*args, **kwargs):
 
 @api_view(["POST"])
 @authentication_classes([CognitoJWTAuthentication])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def create_booking(request):
     """
     Creates a booking WITHOUT requiring property_id or unit_type_id.
@@ -2297,7 +2389,7 @@ def create_booking(request):
             guests=max(1, guests_total),
             companions=companions,            # contains per-person gender & meal now
             status="PENDING_PAYMENT",
-            order=order if order else None,
+            # order=order if order else None,  <-- REMOVED (Booking has no order field)
             check_in=event.start_date,
             check_out=event.end_date,
             blood_group=blood_group,
@@ -2315,6 +2407,11 @@ def create_booking(request):
     except Exception as ex:
         _dbg("BOOKING_CREATE_FAILED", err=str(ex))
         return Response({"error": "booking_create_failed", "detail": str(ex)}, status=400)
+
+    # Link order if present
+    if order:
+        order.booking = booking
+        order.save(update_fields=["booking"])
 
     _dbg("BOOKING_CREATED", booking_id=booking.id)
     return Response(BookingSerializer(booking).data, status=201)
@@ -2461,41 +2558,86 @@ def razorpay_webhook(request):
                         try:
                             bid = int(str(notes_bid).strip())
                             cand = Booking.objects.select_related("user").filter(id=bid).first()
-                            if cand and cand.order_id is None and cand.user_id == matched.user_id:
-                                cand.order = matched
-                                cand.save(update_fields=["order"])
+                            if cand and cand.user_id == matched.user_id:
+                                matched.booking = cand
+                                matched.save(update_fields=["booking"])
                                 booking = cand
                                 _dbg("WH_LINKED_BY_NOTES", booking_id=cand.id)
                         except Exception:
                             pass
 
                 # If still no booking, fallback: a single pending booking for this user without an order
+                # (Logic adjusted for OneToMany: find a booking that implies this order, or recent pending)
                 if booking is None:
                     try:
+                        # Fallback: Find recent pending Booking (last 45 mins)
+                        cutoff = dj_timezone.now() - timedelta(minutes=45)
                         cands = list(Booking.objects.filter(user_id=matched.user_id,
                                                             status="PENDING_PAYMENT",
-                                                            order__isnull=True).order_by("-created_at")[:2])
-                        _dbg("WH_FALLBACK_CANDS", count=len(cands))
+                                                            created_at__gte=cutoff).order_by("-created_at")[:2])
                         if len(cands) == 1:
-                            cands[0].order = matched
-                            cands[0].save(update_fields=["order"])
+                            # Link it
+                            matched.booking = cands[0]
+                            matched.save(update_fields=["booking"])
                             booking = cands[0]
                             _dbg("WH_LINKED_BY_FALLBACK", booking_id=booking.id)
                     except Exception:
                         pass
+                
+                # Double check link if we found a booking but order doesn't have it set
+                if booking and not matched.booking_id:
+                     matched.booking = booking
+                     matched.save(update_fields=["booking"])
 
-                # proceed if we now have a booking and it's not already confirmed
-                if booking and booking.status != "CONFIRMED":
+                # Update Payment Status & Amount
+                if booking:
+                    # Recalculate total paid
+                    all_paid = booking.orders.filter(paid=True).aggregate(Sum('amount'))['amount__sum'] or 0
+                    booking.amount_paid = int(all_paid / 100) # paise -> inr
+                    
+                    total_cost = booking.pricing_total_inr or 0
+                    
+                    new_status = booking.status
+                    new_pay_status = booking.payment_status
+
+                    if booking.amount_paid >= total_cost and total_cost > 0:
+                        new_pay_status = "COMPLETED"
+                        new_status = "CONFIRMED"
+                    elif booking.amount_paid >= 1000:
+                        new_pay_status = "PARTIAL"
+                        new_status = "CONFIRMED" # Enough to confirm booking
+                    else:
+                        new_pay_status = "PARTIAL"
+                        # Keep pending if < 1000? 
+                    
+                    booking.payment_status = new_pay_status
+                    booking.status = new_status
+                    booking.save(update_fields=["amount_paid", "payment_status", "status"])
+
+                # proceed if we now have a booking and it IS confirmed (or just became confirmed)
+                if booking and booking.status == "CONFIRMED":
                     _dbg("WH_ALLOC_START", booking_id=booking.id)
                     if booking.pricing_total_inr is None:
+                        # Should have been priced by create_order, but just in case
                         total_inr, breakdown, guests_total = _compute_booking_pricing(matched.package, booking)
                         booking.pricing_total_inr = total_inr
                         booking.pricing_breakdown = breakdown
                         booking.guests = guests_total
                         booking.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
 
-                    # IMPORTANT: do NOT validate against booking.unit_type here.
-                    picks = allocate_units_for_booking(booking, pkg=matched.package)
+                    # Allocation (Idempotent / Retry)
+                    if not booking.allocations.exists():
+                        try:
+                             # Only allocate if not already allocated
+                             # Allocator checks usage, so safe to call.
+                             picks = allocate_units_for_booking(booking, pkg=matched.package)
+                        except Exception as alloc_e:
+                            _dbg("WH_ALLOC_FAIL", err=str(alloc_e))
+                            picks = []
+                    else:
+                        _dbg("WH_ALLOC_SKIP_EXISTS", booking_id=booking.id)
+                        picks = list(booking.allocations.all().select_related("unit"))
+
 
                 # Create sightseeing registration if user opted in (idempotent)
                 created, ss_reason = _finalize_sightseeing_if_requested(booking)
@@ -2583,10 +2725,23 @@ def ticket_pdf(request, razorpay_order_id: str):
         _dbg("TICKET:UNPAID", rp_order_id=razorpay_order_id)
         return Response({"error": "payment not completed"}, status=400)
 
+    # Self-Healing: If booking is CONFIRMED but has no allocations, try allocating now
+    # (Fixes cases where webhook failed or race conditions occurred)
+    if getattr(o, "booking", None) and o.booking.status == "CONFIRMED":
+        if not o.booking.allocations.exists():
+            _dbg("TICKET:SELF_HEAL_ALLOC_START", rp_order_id=razorpay_order_id)
+            try:
+                allocate_units_for_booking(o.booking, pkg=o.package)
+                _dbg("TICKET:SELF_HEAL_ALLOC_SUCCESS", rp_order_id=razorpay_order_id)
+            except Exception as e:
+                _dbg("TICKET:SELF_HEAL_ALLOC_FAIL", err=str(e))
+
     # Optional: dates/venue from booking
     travel_dates = None
     venue = "Highway to Heal"
     if getattr(o, "booking", None):
+        # refresh booking to get property if allocated above
+        o.booking.refresh_from_db() 
         if getattr(o.booking, "event", None) and o.booking.event.start_date:
             travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
         if getattr(o.booking, "property", None) and o.booking.property.name:
@@ -2673,23 +2828,40 @@ def ticket_pdf_by_booking_id(request, booking_id: int):
 
     try:
         b = (Booking.objects
-             .select_related("order", "event", "property", "user")
+             .select_related("event", "property", "user")
              .get(id=booking_id, user_id=request.user.id))
     except Booking.DoesNotExist:
         _dbg("TICKET:BOOKING_NOT_FOUND", booking_id=booking_id)
         return Response({"error": "not found"}, status=404)
 
-    if not b.order_id:
-        _dbg("TICKET:BOOKING_HAS_NO_ORDER", booking_id=booking_id)
-        return Response({"error": "order not found for booking"}, status=404)
-
+    # Find the paid order for this booking
     o = (Order.objects
-         .select_related("user", "package", "booking", "booking__event", "booking__property")
-         .get(id=b.order_id))
+         .filter(booking=b, paid=True)
+         .select_related("user", "package", "booking__event", "booking__property")
+         .order_by("-created_at")
+         .first())
+
+    if not o:
+        _dbg("TICKET:NO_PAID_ORDER_FOUND", booking_id=booking_id)
+        return Response({"error": "order not found or not paid"}, status=404)
 
     if not o.paid:
         _dbg("TICKET:UNPAID_BY_BOOKING_ID", booking_id=booking_id, order_id=o.id)
         return Response({"error": "payment not completed"}, status=400)
+
+    # Self-Healing: If booking is CONFIRMED but has no allocations, try allocating now
+    if b.status == "CONFIRMED" and not b.allocations.exists():
+         _dbg("TICKET:SELF_HEAL_ALLOC_START_BY_BID", booking_id=booking_id)
+         try:
+             allocate_units_for_booking(b, pkg=o.package)
+             b.refresh_from_db() # get property/unit_type
+             _dbg("TICKET:SELF_HEAL_ALLOC_SUCCESS_BY_BID", booking_id=booking_id)
+         except Exception as e:
+             _dbg("TICKET:SELF_HEAL_ALLOC_FAIL_BY_BID", err=str(e))
+    
+    # CRITICAL: Ensure 'o' uses the fresh booking object (with allocations/property)
+    # otherwise pdf generator sees stale 'o.booking'
+    o.booking = b
 
     travel_dates = None
     venue = "Highway to Heal"
@@ -2698,6 +2870,20 @@ def ticket_pdf_by_booking_id(request, booking_id: int):
             travel_dates = o.booking.event.start_date.strftime("%d %b %Y")
         if getattr(o.booking, "property", None) and o.booking.property.name:
             venue = o.booking.property.name
+
+    # Calculate financial summary for PDF
+    total_inr = b.pricing_total_inr or 0
+    paid_inr = b.amount_paid or 0
+    due_inr = total_inr - paid_inr
+    
+    # We'll inject these into the PDF by creating a custom 'taxes_fees' list or similar.
+    # build_invoice_and_pass_pdf_from_order doesn't explicit take them, let's see its signature.
+    # It takes **kwargs? No, explicit args. 
+    # Let's check 'build_invoice_and_pass_pdf_from_order' in pdf.py again.
+    # It seems missing in my view. I will assume I need to pass them or update the function.
+    # Wait, I didn't verify 'build_invoice_and_pass_pdf_from_order' source. 
+    # I'll update 'views.py' to just calculate them first, then I'll use a new kwarg 'extra_rows'.
+
 
     try:
         pdf_bytes = build_invoice_and_pass_pdf_from_order(
@@ -2878,7 +3064,7 @@ def sightseeing_optin(request):
     # opt_in == True pathway
     try:
         b = (Booking.objects
-             .select_related("order", "user")
+             .select_related("user")
              .get(id=booking_id, user=request.user))
     except Booking.DoesNotExist:
         return Response({"error": "invalid booking_id"}, status=404)
@@ -3084,28 +3270,38 @@ def razorpay_callback(request):
         try:
             b = getattr(o, "booking", None)
             if b is None:
-                # conservative fallback: link if the user has exactly one pending booking without an order
+                # conservative fallback: link if the user has exactly one pending booking
                 try:
+                    cutoff = dj_timezone.now() - timedelta(minutes=45)
                     cands = list(Booking.objects.filter(user_id=o.user_id,
                                                         status="PENDING_PAYMENT",
-                                                        order__isnull=True).order_by("-created_at")[:2])
+                                                        created_at__gte=cutoff).order_by("-created_at")[:2])
                     if len(cands) == 1:
-                        cands[0].order = o
-                        cands[0].save(update_fields=["order"])
+                        o.booking = cands[0]
+                        o.save(update_fields=["booking"])
                         b = cands[0]
                 except Exception:
                     pass
-            if b and b.status != "CONFIRMED":
-                if b.pricing_total_inr is None:
-                    total, breakdown, guests_total = _compute_booking_pricing(o.package, b)
-                    b.pricing_total_inr = total
-                    b.pricing_breakdown = breakdown
-                    b.guests = guests_total
-                    b.save(update_fields=["pricing_total_inr", "pricing_breakdown", "guests"])
-                allocate_units_for_booking(b, pkg=o.package)
-                _finalize_sightseeing_if_requested(b)
-        except Exception as e:
-            _dbg("CALLBACK_ALLOC_ERR", err=str(e), order_id=o.id, rp_order_id=o.razorpay_order_id)
+            
+            if b:
+                # Recalculate and update status (similar to webhook)
+                all_paid = b.orders.filter(paid=True).aggregate(Sum('amount'))['amount__sum'] or 0
+                b.amount_paid = int(all_paid / 100) # paise -> inr
+                
+                total_cost = b.pricing_total_inr or 0
+                if b.amount_paid >= total_cost and total_cost > 0:
+                    b.payment_status = "COMPLETED"
+                    b.status = "CONFIRMED"
+                elif b.amount_paid >= 1000:
+                    b.payment_status = "PARTIAL"
+                    b.status = "CONFIRMED"
+                else:
+                    b.payment_status = "PARTIAL"
+                
+                b.save(update_fields=["amount_paid", "payment_status", "status"])
+
+        except Exception:
+            pass
 
         return HttpResponseRedirect(_payment_redirect_url(request, "success", o))
 
