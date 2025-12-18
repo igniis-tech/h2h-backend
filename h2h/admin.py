@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.db import transaction
 from django.utils.text import slugify
 import csv, io, re
-import pkg_resources
+
 from django.db import models as dj_models
 from django.forms import Textarea
 from django.db.models import Prefetch
