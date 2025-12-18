@@ -73,6 +73,43 @@ def admin_config_view(request):
                 "related_key": model_to_key.get(field.related_model) if field.related_model else None, # key for fetching options
             })
 
+        # Introspect Serializer for computed fields (e.g. party_brief)
+        serializer_cls = getattr(viewset, "serializer_class", None)
+        if serializer_cls:
+            try:
+                # We need a context-less instance to inspect static fields
+                ser_instance = serializer_cls()
+                for ser_field_name, ser_field_obj in ser_instance.get_fields().items():
+                    # Skip if already added via model loop
+                    if any(f["name"] == ser_field_name for f in fields_config):
+                        continue
+                    
+                    # Inspect type
+                    # SerializerMethodField -> text
+                    # ReadOnlyField -> text
+                    from rest_framework import serializers
+                    f_type = "text"
+                    if isinstance(ser_field_obj, (serializers.IntegerField, serializers.DecimalField)):
+                        f_type = "number"
+                    elif isinstance(ser_field_obj, serializers.BooleanField):
+                        f_type = "boolean"
+                    
+                    # We treat all non-model serializer fields as read_only computed columns
+                    fields_config.append({
+                        "name": ser_field_name,
+                        "label": ser_field_name.replace("_", " ").title(),
+                        "type": f_type,
+                        "required": False,
+                        "read_only": True,
+                        "choices": [],
+                        "is_filter": False,
+                        "is_search": False,
+                        "related_model": None,
+                        "related_key": None
+                    })
+            except Exception as e:
+                pass # Fallback if serializer inspection fails
+
         # Actions (Bulk)
         actions = ["delete"] # default
         # TODO: Add custom actions inspection
