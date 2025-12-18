@@ -212,6 +212,22 @@ class BookingViewSet(AdminModelViewSet):
         elif amount_paid > 0:
             payment_status = "PARTIAL"
         
+        # Parse Companions
+        companions = data.get("companions") or []
+        if isinstance(companions, str):
+            import json
+            try:
+                companions = json.loads(companions)
+            except:
+                companions = []
+        
+        # Calculate Guests (Primary + Companions)
+        # Verify guest count matches companions
+        guests_count = 1 + len(companions) if isinstance(companions, list) else 1
+        # Allow override if explicit guests passed (e.g. for simple count without names)
+        if "guests" in data:
+            guests_count = int(data["guests"])
+
         # 2. Create Booking
         booking = Booking.objects.create(
             user=user,
@@ -221,7 +237,7 @@ class BookingViewSet(AdminModelViewSet):
             status=status,
             payment_status=payment_status,
             amount_paid=amount_paid,
-            guests=int(data.get("guests") or 1),
+            guests=guests_count,
             category=data.get("category", ""),
             pricing_total_inr=total_amount, 
             
@@ -232,6 +248,9 @@ class BookingViewSet(AdminModelViewSet):
             blood_group=data.get("blood_group", ""),
             emergency_contact_name=data.get("emergency_contact_name", ""),
             emergency_contact_phone=data.get("emergency_contact_phone", ""),
+            
+            # Save Companions List
+            companions=companions
         )
 
         # 3. Create Dummy Order (for record keeping & PDF)
