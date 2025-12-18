@@ -15,6 +15,15 @@ def admin_config_view(request):
         "models": []
     }
 
+    # First pass: Build a map of Model -> URL Key
+    model_to_key = {}
+    for prefix, viewset, basename in router.registry:
+        model_cls = getattr(viewset, "queryset", None)
+        if hasattr(model_cls, "model"):
+            model_cls = model_cls.model
+        if model_cls:
+            model_to_key[model_cls] = prefix
+
     for prefix, viewset, basename in router.registry:
         model_cls = getattr(viewset, "queryset", None)
         if hasattr(model_cls, "model"): # Handle QuerySet
@@ -34,8 +43,6 @@ def admin_config_view(request):
         search_fields = getattr(viewset, "search_fields", [])
         ordering_fields = getattr(viewset, "ordering_fields", ["id"])
         
-        # Determine strict fields from Serializer if possible, 
-        # but for now we introspect the Model for broad compatibility
         for field in model_cls._meta.fields:
             field_type = "text"
             if isinstance(field, models.AutoField): field_type = "number" # ID
@@ -62,7 +69,8 @@ def admin_config_view(request):
                 "choices": choices,
                 "is_filter": field.name in filter_fields,
                 "is_search": field.name in search_fields or any(s.startswith(field.name + "__") for s in search_fields),
-                "related_model": field.related_model._meta.label if field.related_model else None
+                "related_model": field.related_model._meta.label if field.related_model else None,
+                "related_key": model_to_key.get(field.related_model) if field.related_model else None, # key for fetching options
             })
 
         # Actions (Bulk)

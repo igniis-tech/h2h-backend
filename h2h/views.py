@@ -403,6 +403,7 @@ def me(request):
 # -----------------------------------
 
 @api_view(["GET"])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def list_packages(request):
     """

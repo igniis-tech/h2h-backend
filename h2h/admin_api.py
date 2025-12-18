@@ -97,8 +97,66 @@ class PromoCodeViewSet(AdminModelViewSet):
     serializer_class = PromoCodeSerializer
     filterset_fields = ["is_active", "kind"]
 
+from rest_framework import serializers # ensure valid reference
+
 class AdminBookingSerializer(BookingSerializer):
     user = UserSerializer(read_only=True)
+    party_brief = serializers.SerializerMethodField()
+    alloc_brief = serializers.SerializerMethodField()
+
+    class Meta(BookingSerializer.Meta):
+        fields = BookingSerializer.Meta.fields + ["party_brief", "alloc_brief"]
+
+    def get_party_brief(self, obj):
+        g_map = {"M": 0, "F": 0, "O": 0}
+        m_map = {"VEG": 0, "NON_VEG": 0, "VEGAN": 0, "JAIN": 0, "OTHER": 0}
+
+        def norm_gender(val):
+            v = (val or "").strip().upper()
+            return v if v in g_map else "O"
+
+        def norm_meal(val):
+            v = (val or "").strip().upper().replace("-", "").replace(" ", "")
+            if v in {"VEG", "VEGETARIAN", "V"}: return "VEG"
+            if v in {"NONVEG", "NONVEGETARIAN", "NV", "N", "EGG", "EGGETARIAN", "CHICKEN", "MEAT"}: return "NON_VEG"
+            if v in {"VEGAN", "VG"}: return "VEGAN"
+            if v == "JAIN": return "JAIN"
+            return "OTHER"
+
+        # primary
+        g_map[norm_gender(getattr(obj, "primary_gender", None))] += 1
+        m_map[norm_meal(getattr(obj, "primary_meal_preference", None))] += 1
+
+        # companions
+        comps = getattr(obj, "companions", None) or []
+        for c in comps:
+            if not isinstance(c, dict): continue
+            g_map[norm_gender(c.get("gender"))] += 1
+            m_map[norm_meal(c.get("meal") or c.get("meal_preference"))] += 1
+
+        ppl = 1 + sum(1 for c in comps if isinstance(c, dict) and (c.get("name") or "").strip())
+        genders = f"M{g_map['M']}/F{g_map['F']}/O{g_map['O']}"
+        meal_parts = [f"{k}{v}" for k, v in m_map.items() if v]
+        meals = "/".join(meal_parts) if meal_parts else "—"
+        return f"{ppl} ppl • Genders {genders} • Meals {meals}"
+
+    def get_alloc_brief(self, obj):
+        # Use preloaded allocations if available, else fetch
+        allocs = getattr(obj, "allocations", None)
+        if allocs is None:
+             # Fallback to reverse relation lookup
+             allocs = obj.allocation_set.all()
+        
+        parts = []
+        for a in allocs:
+            u = a.unit
+            if not u: continue
+            prop = u.property.name if u.property else "—"
+            utype = u.unit_type.name if u.unit_type else "—"
+            label = u.label or f"Unit#{u.id}"
+            parts.append(f"{prop} / {utype} / {label}")
+        
+        return " | ".join(parts) if parts else "—"
 
 class BookingViewSet(AdminModelViewSet):
     queryset = Booking.objects.all().select_related('user', 'event', 'property', 'unit_type', 'promo_code').prefetch_related('orders')
