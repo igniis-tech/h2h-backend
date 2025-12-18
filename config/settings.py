@@ -22,6 +22,7 @@ ALLOWED_HOSTS = [
     "highwaytoheal.in",  # allow vercel preview hosts (Host header)
     "highwaytohill.shop",
     "highwaytoheal.org",
+    "admin.highwaytoheal.org",
 ]
 
 # --- behind proxy / https ---
@@ -114,7 +115,7 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 
 # ---- CORS ----
-CORS_ORIGIN_ALLOW_ALL = False # Must be False for credentials
+CORS_ORIGIN_ALLOW_ALL = True # Enabled for Flutter Dev
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -123,6 +124,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://highwaytoheal.in",
     "https://www.highwaytohill.shop",
     "https://highwaytoheal.org",
+    "https://admin.highwaytoheal.org",
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",
@@ -147,15 +149,26 @@ CSRF_TRUSTED_ORIGINS = [
     "https://highwaytoheal.in",
     "https://www.highwaytohill.shop",
     "https://highwaytoheal.org",
+    "https://admin.highwaytoheal.org",
 ]
 
 # ---- DRF ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",  # ✅ Add this
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
         "h2h.auth_cognito.CognitoJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+}
+
+from datetime import timedelta
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": False,
+    "BLACKLIST_AFTER_ROTATION": False,
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
 # ---- Cognito (env-driven) ----
