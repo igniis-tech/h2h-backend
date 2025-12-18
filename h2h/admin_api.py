@@ -166,6 +166,14 @@ class BookingViewSet(AdminModelViewSet):
             guests=int(data.get("guests") or 1),
             category=data.get("category", ""),
             pricing_total_inr=total_amount, 
+            
+            # New Fields
+            primary_gender=data.get("primary_gender", "O"),
+            primary_meal_preference=data.get("primary_meal_preference", "VEG"),
+            primary_age=data.get("primary_age"),
+            blood_group=data.get("blood_group", ""),
+            emergency_contact_name=data.get("emergency_contact_name", ""),
+            emergency_contact_phone=data.get("emergency_contact_phone", ""),
         )
 
         # 3. Create Dummy Order (for record keeping & PDF)
