@@ -255,17 +255,21 @@ class BookingViewSet(AdminModelViewSet):
 
         # 3. Create Dummy Order (for record keeping & PDF)
         if amount_paid > 0:
+            payment_type = "FULL" if amount_paid >= total_amount else "ADVANCE"
+            pkg = Package.objects.filter(active=True).first()
+            if not pkg:
+                pkg = Package.objects.create(name="Manual Fallback", price_inr=5000)
+
             Order.objects.create(
                 user=user,
                 booking=booking,
+                package=pkg,
                 amount=amount_paid * 100, # paise
-                amount_paid=amount_paid * 100,
                 currency="INR",
-                receipt=f"MANUAL_PAID_{booking.id}",
-                razorpay_order_id=f"MAN_PID_{booking.id}",
-                payment_type="MANUAL (CASH/UPI)",
+                razorpay_order_id=f"MAN_PID_{booking.id}_{int(timezone.now().timestamp())}",
+                payment_type=payment_type,
                 paid=True,
-                status="paid"
+                razorpay_payment_id=f"MAN_PAY_{booking.id}"
             )
         
         # Create a pending/due order if partial? (Optional, maybe later)
