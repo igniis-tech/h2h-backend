@@ -144,9 +144,16 @@ class AdminBookingSerializer(BookingSerializer):
     def get_alloc_brief(self, obj):
         # Use preloaded allocations if available, else fetch
         allocs = getattr(obj, "allocations", None)
+        
+        # If it's a Manager (not a list), convert to iterable
+        if hasattr(allocs, 'all'):
+             allocs = allocs.all()
+        
         if allocs is None:
-             # Fallback to reverse relation lookup
-             allocs = obj.allocation_set.all()
+             # Fallback
+             allocs = getattr(obj, "allocation_set", None)
+             if hasattr(allocs, 'all'): allocs = allocs.all()
+             else: allocs = []
         
         parts = []
         for a in allocs:
