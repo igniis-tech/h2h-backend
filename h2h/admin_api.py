@@ -2,6 +2,7 @@ from rest_framework import viewsets, permissions, filters
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.db.models import Sum
+from django.utils import timezone
 from .models import (
     UserProfile, Package, PackageImage, Order, WebhookEvent,
     Property, UnitType, Unit,
@@ -228,6 +229,14 @@ class BookingViewSet(AdminModelViewSet):
         if "guests" in data:
             guests_count = int(data["guests"])
 
+        # Helper for safe int conversion
+        def safe_int(val):
+            if val in [None, "", "null"]: return None
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return None
+
         # 2. Create Booking
         booking = Booking.objects.create(
             user=user,
@@ -241,10 +250,10 @@ class BookingViewSet(AdminModelViewSet):
             category=data.get("category", ""),
             pricing_total_inr=total_amount, 
             
-            # New Fields
+            # New Fields - Safely handly empty strings
             primary_gender=data.get("primary_gender", "O"),
             primary_meal_preference=data.get("primary_meal_preference", "VEG"),
-            primary_age=data.get("primary_age"),
+            primary_age=safe_int(data.get("primary_age")),
             blood_group=data.get("blood_group", ""),
             emergency_contact_name=data.get("emergency_contact_name", ""),
             emergency_contact_phone=data.get("emergency_contact_phone", ""),

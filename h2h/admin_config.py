@@ -11,8 +11,17 @@ def admin_config_view(request):
     Returns configuration for the mobile admin app.
     Introspects the registered ViewSets in admin_api.py.
     """
+    # Fetch global constants/choices
+    from .models import InventoryRow
+    categories = sorted(list(InventoryRow.objects.values_list("category", flat=True).distinct()))
+    # filter empty
+    categories = [c for c in categories if c]
+
     config = {
-        "models": []
+        "models": [],
+        "constants": {
+            "categories": categories
+        }
     }
 
     # First pass: Build a map of Model -> URL Key
