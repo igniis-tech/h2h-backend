@@ -83,6 +83,50 @@ class UnitViewSet(AdminModelViewSet):
     filterset_fields = ["status", "property", "unit_type", "category"]
     search_fields = ["label"]
 
+    @action(detail=False, methods=['GET'])
+    def allocation_map(self, request):
+        """
+        Returns a hierarchical view: Property -> Unit -> Allocations (Occupants)
+        """
+        properties = Property.objects.all().prefetch_related(
+            'units',
+            'units__allocations',
+            'units__allocations__booking',
+            'units__unit_type'
+        )
+        
+        results = []
+        for prop in properties:
+            prop_data = {
+                "id": prop.id,
+                "name": prop.name,
+                "units": []
+            }
+            for u in prop.units.all():
+                allocs = []
+                for a in u.allocations.all():
+                    booking = a.booking
+                    allocs.append({
+                        "booking_id": booking.id,
+                        "booking_name": booking.user.first_name or booking.user.username,
+                        "seats": a.seats,
+                        # Fallback for gender if not on booking?
+                        "gender": getattr(booking, "primary_gender", "O")
+                    })
+                
+                prop_data["units"].append({
+                    "id": u.id,
+                    "label": u.label,
+                    "capacity": u.capacity,
+                    "status": u.status,
+                    "category": u.category,
+                    "unit_type_name": u.unit_type.name,
+                    "allocations": allocs
+                })
+            results.append(prop_data)
+            
+        return Response({"results": results})
+
 class EventViewSet(AdminModelViewSet):
     queryset = Event.objects.all()
     serializer_class = EventSerializer
@@ -272,7 +316,16 @@ class BookingViewSet(AdminModelViewSet):
         # 3. Create Dummy Order (for record keeping & PDF)
         if amount_paid > 0:
             payment_type = "FULL" if amount_paid >= total_amount else "ADVANCE"
-            pkg = Package.objects.filter(active=True).first()
+            
+            # Use provided package_id or fallback
+            pkg_id = data.get("package_id")
+            pkg = None
+            if pkg_id:
+                pkg = Package.objects.filter(id=pkg_id).first()
+            
+            if not pkg:
+                pkg = Package.objects.filter(active=True).first()
+            
             if not pkg:
                 pkg = Package.objects.create(name="Manual Fallback", price_inr=5000)
 

@@ -1799,6 +1799,9 @@ def allocate_units_for_booking(booking: Booking, pkg: Package | None = None):
           .filter(unit_type_id__in=([pinned_ut] if pinned_ut else allowed_ids))
           .exclude(id__in=full_ids))
 
+    if booking.category:
+        qs = qs.filter(category__iexact=booking.category.strip())
+
     if booking.property_id:
         qs = qs.order_by(
             models.Case(
