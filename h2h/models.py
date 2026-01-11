@@ -383,6 +383,9 @@ class Booking(models.Model):
     pricing_total_inr = models.IntegerField(null=True, blank=True)
     pricing_breakdown = models.JSONField(null=True, blank=True)
 
+    is_checked_in = models.BooleanField(default=False)
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+
     status = models.CharField(max_length=20, choices=STATUS, default="PENDING_PAYMENT")
     created_at = models.DateTimeField(auto_now_add=True)
     

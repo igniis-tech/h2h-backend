@@ -325,8 +325,6 @@ class BookingViewSet(AdminModelViewSet):
             
             if not pkg:
                 pkg = Package.objects.filter(active=True).first()
-            
-            if not pkg:
                 pkg = Package.objects.create(name="Manual Fallback", price_inr=5000)
 
             Order.objects.create(
@@ -352,6 +350,65 @@ class BookingViewSet(AdminModelViewSet):
                 pass 
 
         return Response(AdminBookingSerializer(booking).data)
+
+    @action(detail=False, methods=['POST'])
+    def scan_check_in(self, request):
+        """
+        Expects {"order_id": "..."} or {"booking_id": ...}
+        Marks the booking as checked-in.
+        """
+        data = request.data
+        
+        # Internal helper for safe int within this method if needed, 
+        # but manual_create already has one. Let's use the one from the scope if possible
+        # or just redefine it/use local logic.
+        def _to_int(val):
+            if val in [None, "", "null"]: return None
+            try: return int(val)
+            except: return None
+
+        booking_id = _to_int(data.get("booking_id"))
+        order_id = data.get("order_id")
+
+        booking = None
+        if booking_id:
+            booking = Booking.objects.filter(id=booking_id).first()
+        elif order_id:
+            from .models import Order
+            order = Order.objects.filter(razorpay_order_id=order_id).first()
+            if not order and str(order_id).isdigit():
+                order = Order.objects.filter(id=int(order_id)).first()
+            
+            if order:
+                booking = order.booking
+
+        if not booking:
+            return Response({"error": "booking_not_found"}, status=404)
+
+        if booking.status != "CONFIRMED":
+            return Response({"error": "booking_not_confirmed", "status": booking.status}, status=400)
+
+        if booking.is_checked_in:
+             return Response({
+                "message": "Already checked in",
+                "booking_id": booking.id,
+                "guest_name": booking.user.first_name or booking.user.username,
+                "checked_in_at": booking.checked_in_at
+            })
+
+        booking.is_checked_in = True
+        booking.checked_in_at = timezone.now()
+        booking.save(update_fields=["is_checked_in", "checked_in_at"])
+
+        return Response({
+            "message": "Check-in successful",
+            "booking_id": booking.id,
+            "guest_name": booking.user.first_name or booking.user.username,
+            "property": getattr(booking.property, "name", "N/A"),
+            "unit": getattr(booking.unit_type, "name", "N/A"),
+            "category": booking.category,
+            "guests": booking.guests
+        })
 
     def get_permissions(self):
         if self.action == 'ticket_pdf':

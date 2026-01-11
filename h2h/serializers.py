@@ -187,6 +187,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "status", "created_at",
             "primary_gender","primary_age",
             "primary_meal_preference",
+            "is_checked_in", "checked_in_at",
         ]
         read_only_fields = [
             "status", "created_at", "pricing_total_inr", "pricing_breakdown",
